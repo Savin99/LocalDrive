@@ -1,0 +1,10 @@
+// Подпись приложения.
+//
+// Team ID не хранится в репозитории: положи свой в Support/Signing.local.xcconfig
+// (файл в .gitignore), одной строкой:
+//
+//     DEVELOPMENT_TEAM = ABCDE12345
+//
+// Без этого файла Xcode просто попросит выбрать команду
+// в Signing & Capabilities — сборка на устройство всё равно заработает.
+#include? "Signing.local.xcconfig"

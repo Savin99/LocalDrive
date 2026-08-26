@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# XcodeGen генерирует проект из project.yml
+LocalDrive.xcodeproj/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+
+# Python (Design/)
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+
+# Локальный Team ID для подписи
+Support/Signing.local.xcconfig
