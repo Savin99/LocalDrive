@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct RootView: View {
-    @Environment(LockManager.self) private var lock
     @Environment(SearchService.self) private var search
     @Environment(\.scenePhase) private var scenePhase
 
@@ -18,25 +17,20 @@ struct RootView: View {
         #endif
     }
 
+    // Экрана блокировки нет: приложение открывается сразу на главном экране
+    // (решение владельца от 24.10.2026). Приватное прячут скрытые папки
     private var content: some View {
         ZStack {
-            if !lock.hasPIN {
-                SetupPinView()
-            } else if lock.isLocked {
-                LockView()
-            } else {
-                MainView()
-            }
+            MainView()
 
             // Шторка приватности перекрывает содержимое, пока приложение не активно:
             // именно этот кадр iOS кладёт в переключатель приложений
-            if scenePhase != .active && lock.hasPIN {
+            if scenePhase != .active {
                 PrivacyShield()
             }
         }
-        // Переходы между экранами намеренно без анимации: любая плавность
-        // означает кадр, где сквозь замок видно содержимое
-        .animation(nil, value: lock.isLocked)
+        // Без анимации: плавное появление означало бы кадр, где содержимое
+        // просвечивает сквозь шторку
         .animation(nil, value: scenePhase)
     }
 }

@@ -368,38 +368,3 @@ final class VaultStoreTests: XCTestCase {
         return store.folders[0]
     }
 }
-
-final class ZGestureRecognizerTests: XCTestCase {
-    private let screen = CGSize(width: 390, height: 844)
-
-    func testRecognizesCenteredZSwipe() {
-        let points = [
-            CGPoint(x: 80, y: 270), CGPoint(x: 130, y: 268),
-            CGPoint(x: 190, y: 272), CGPoint(x: 250, y: 269), CGPoint(x: 310, y: 272),
-            CGPoint(x: 265, y: 300), CGPoint(x: 220, y: 330),
-            CGPoint(x: 170, y: 360), CGPoint(x: 120, y: 390), CGPoint(x: 82, y: 410),
-            CGPoint(x: 145, y: 412), CGPoint(x: 220, y: 408), CGPoint(x: 310, y: 411),
-        ]
-
-        XCTAssertTrue(ZGestureRecognizer.matches(points: points, in: screen))
-    }
-
-    func testRejectsOrdinaryVerticalScroll() {
-        let points = stride(from: 250.0, through: 500.0, by: 25.0).map {
-            CGPoint(x: 195, y: $0)
-        }
-
-        XCTAssertFalse(ZGestureRecognizer.matches(points: points, in: screen))
-    }
-
-    func testRejectsZDrawnAtTopEdge() {
-        let points = [
-            CGPoint(x: 40, y: 20), CGPoint(x: 110, y: 20), CGPoint(x: 190, y: 20),
-            CGPoint(x: 270, y: 20), CGPoint(x: 210, y: 60), CGPoint(x: 150, y: 100),
-            CGPoint(x: 80, y: 140), CGPoint(x: 150, y: 140), CGPoint(x: 220, y: 140),
-            CGPoint(x: 300, y: 140),
-        ]
-
-        XCTAssertFalse(ZGestureRecognizer.matches(points: points, in: screen))
-    }
-}

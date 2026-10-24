@@ -8,13 +8,6 @@ final class ImportUITests: XCTestCase {
     func testDocumentFromFilesAppearsInFolder() throws {
         let app = XCUIApplication()
         app.launch()
-        if app.staticTexts["Придумайте код"].waitForExistence(timeout: 10) {
-            enterPin(in: app)
-            XCTAssertTrue(app.staticTexts["Повторите код"].waitForExistence(timeout: 5))
-            enterPin(in: app)
-        } else if app.staticTexts["Введите код"].waitForExistence(timeout: 5) {
-            enterPin(in: app)
-        }
 
         let files = app.buttons["pageFiles"]
         XCTAssertTrue(files.waitForExistence(timeout: 10))
@@ -55,9 +48,5 @@ final class ImportUITests: XCTestCase {
         let imported = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Куда положить")).firstMatch
         XCTAssertTrue(imported.waitForExistence(timeout: 10), "файл не появился в папке после «Открыть»")
         XCTAssertFalse(app.alerts["Файл не добавлен"].exists)
-    }
-
-    private func enterPin(in app: XCUIApplication) {
-        for digit in "1111" { app.buttons[String(digit)].tap() }
     }
 }

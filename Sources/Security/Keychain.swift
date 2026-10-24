@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-// Минимальная обёртка над Keychain для хранения PIN-кода
+// Минимальная обёртка над Keychain для секретов скрытых папок
 enum Keychain {
     @discardableResult
     static func set(

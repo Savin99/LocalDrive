@@ -1,16 +1,35 @@
 import XCTest
 
 // Две страницы главного экрана — «Чат» и «Файлы»: переключатель вверху
-// и свайп между ними. С «Файлов» к чату листает только свайп от левого края:
-// посередине страницы живут жест Z и лента «Недавнее». Внутри папки
+// и свайп между ними. Экрана блокировки нет — приложение открывается сразу
+// на чате. С «Файлов» к чату листает свайп вправо из любого места корня
+// (решение владельца от 24.10.2026): от левого края — за пальцем, из середины —
+// по отпусканию, потому что там же рисуют секретный знак. Внутри папки
 // переключателя нет, а свайп от края — системное «назад»
 final class PagerUITests: XCTestCase {
     private let folderName = "Страницы QA"
 
+    func testLaunchOpensMainScreenWithoutLock() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let chatPage = app.buttons["pageChat"]
+        XCTAssertTrue(chatPage.waitForExistence(timeout: 10), "главный экран не открылся")
+        XCTAssertTrue(chatPage.isSelected, "после запуска открыт не чат")
+        XCTAssertFalse(app.staticTexts["Придумайте код"].exists, "первый запуск просит код")
+        XCTAssertFalse(app.staticTexts["Введите код"].exists, "запуск просит код")
+
+        // Возврат из фона тоже без кода
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(chatPage.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil { chatPage.isHittable }, "после возврата из фона главный экран закрыт")
+        XCTAssertFalse(app.staticTexts["Введите код"].exists, "возврат из фона просит код")
+    }
+
     func testSwitcherAndSwipesMoveBetweenPages() throws {
         let app = XCUIApplication()
         app.launch()
-        unlock(app)
 
         let chatPage = app.buttons["pageChat"]
         let filesPage = app.buttons["pageFiles"]
@@ -30,23 +49,48 @@ final class PagerUITests: XCTestCase {
         filesPage.tap()
         XCTAssertTrue(waitUntil { filesPage.isSelected && newFolder.isHittable }, "переключатель не открыл «Файлы»")
 
-        // Свайп посередине «Файлов» страницу не листает
+        // Свайп вправо посередине «Файлов» возвращает к чату
         app.swipeRight()
-        XCTAssertFalse(waitUntil(timeout: 1.5) { chatPage.isSelected }, "свайп посередине «Файлов» увёл на чат")
-
-        // От левого края — назад к чату. Жест начинается у карточки папки,
-        // и открыться она не должна: ниже «Файлы» обязаны открыться на корне
-        swipeFromLeftEdge(app)
-        XCTAssertTrue(waitUntil { chatPage.isSelected && chatInput.isHittable }, "свайп от края не вернул чат")
+        XCTAssertTrue(waitUntil { chatPage.isSelected && chatInput.isHittable }, "свайп посередине «Файлов» не вернул чат")
 
         // На чате свайп влево открывает «Файлы»
         app.swipeLeft()
+        XCTAssertTrue(waitUntil { filesPage.isSelected && newFolder.isHittable }, "свайп влево не открыл «Файлы»")
+
+        // Прокрутка «Файлов» страницу не листает
+        app.swipeUp()
+        app.swipeDown()
+        XCTAssertFalse(waitUntil(timeout: 1.5) { chatPage.isSelected }, "прокрутка «Файлов» увела на чат")
+
+        // Свайп из середины, начатый на карточке папки, ведёт к чату и папку
+        // не открывает: ниже «Файлы» обязаны открыться на корне
+        createFolder(in: app)
+        let card = app.staticTexts[folderName].firstMatch
+        bringToMiddle(card, in: app)
+        // От начала подписи до правого края, быстро: карточка может стоять
+        // в правом столбце, и путь выйдет короче трети ширины — тогда листает
+        // взмах быстрее 600 pt/с
+        let cardPoint = card.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5))
+        let travel = app.windows.firstMatch.frame.maxX - 8 - (card.frame.minX + card.frame.width * 0.05)
+        cardPoint.press(
+            forDuration: 0.05,
+            thenDragTo: cardPoint.withOffset(CGVector(dx: travel, dy: 0)),
+            withVelocity: .fast,
+            thenHoldForDuration: 0
+        )
+        XCTAssertTrue(waitUntil { chatPage.isSelected && chatInput.isHittable }, "свайп с карточки папки не вернул чат")
+        app.swipeLeft()
         XCTAssertTrue(
             waitUntil { filesPage.isSelected && newFolder.isHittable },
-            "свайп влево не открыл «Файлы» или свайп от края открыл папку под пальцем"
+            "свайп влево не открыл «Файлы» или свайп с карточки открыл папку под пальцем"
         )
 
-        createFolder(in: app)
+        // От левого края — за пальцем, как раньше
+        swipeFromLeftEdge(app)
+        XCTAssertTrue(waitUntil { chatPage.isSelected && chatInput.isHittable }, "свайп от края не вернул чат")
+        app.swipeLeft()
+        XCTAssertTrue(waitUntil { filesPage.isSelected && newFolder.isHittable }, "свайп от края открыл папку под пальцем")
+
         app.staticTexts[folderName].firstMatch.tap()
         XCTAssertTrue(waitUntil { !filesPage.exists }, "переключатель виден внутри папки")
 
@@ -59,18 +103,20 @@ final class PagerUITests: XCTestCase {
 
     // MARK: - Хелперы
 
-    private func unlock(_ app: XCUIApplication) {
-        if app.staticTexts["Придумайте код"].waitForExistence(timeout: 10) {
-            enterPin(in: app)
-            XCTAssertTrue(app.staticTexts["Повторите код"].waitForExistence(timeout: 5))
-            enterPin(in: app)
-        } else if app.staticTexts["Введите код"].waitForExistence(timeout: 5) {
-            enterPin(in: app)
+    /// Карточку — на середину экрана: в симуляторе остаются папки других
+    /// тестов, и новая может оказаться ниже края. Штрих оттуда начался бы на
+    /// полоске «домой» и увёл бы приложение в фон. Вертикальные протяжки
+    /// заодно проверяют, что прокрутка «Файлов» страницу не листает
+    private func bringToMiddle(_ element: XCUIElement, in app: XCUIApplication) {
+        let height = app.windows.firstMatch.frame.height
+        for _ in 0..<8 {
+            let middle = element.frame.midY
+            if middle > height * 0.3 && middle < height * 0.7 { return }
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+            let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: middle > height * 0.7 ? 0.35 : 0.85))
+            from.press(forDuration: 0.05, thenDragTo: to)
         }
-    }
-
-    private func enterPin(in app: XCUIApplication) {
-        for digit in "1111" { app.buttons[String(digit)].tap() }
+        XCTAssertFalse(app.buttons["pageChat"].isSelected, "прокрутка «Файлов» увела на чат")
     }
 
     private func swipeFromLeftEdge(_ app: XCUIApplication) {

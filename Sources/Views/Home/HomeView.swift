@@ -2,9 +2,8 @@ import SwiftUI
 
 struct HomeView: View {
     @Environment(VaultStore.self) private var store
-    @Environment(LockManager.self) private var lock
+    @Environment(HiddenFolders.self) private var hiddenFolders
     @Environment(\.isOffscreenPage) private var isOffscreenPage
-    @Environment(\.scenePhase) private var scenePhase
 
     @State private var editingFolder: VaultFolder?
     @State private var isCreating = false
@@ -12,8 +11,6 @@ struct HomeView: View {
     @State private var folderPendingDelete: VaultFolder?
     @State private var movingFolder: VaultFolder?
     @State private var recentPreview: VaultFile?
-    @State private var areHiddenFoldersRevealed = false
-    @State private var zGesturePoints: [CGPoint] = []
     @State private var toast: String?
     @State private var query = ""
     @State private var openedResult: OpenedResult?
@@ -29,6 +26,10 @@ struct HomeView: View {
 
         var id: String { file.id }
     }
+
+    /// Знак рисуют по всей странице (FilesStrokeGesture в MainView),
+    /// уход в фон прячет папки снова (LocalDriveApp)
+    private var areHiddenFoldersRevealed: Bool { hiddenFolders.isRevealed }
 
     private var isSearching: Bool {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -75,7 +76,6 @@ struct HomeView: View {
                     }
                 }
                 .contentShape(Rectangle())
-                .simultaneousGesture(zGesture(in: proxy.size))
                 .navigationTitle("Мои файлы")
                 .navigationBarTitleDisplayMode(.inline)
                 // Посередине шапки стоит общий переключатель «Чат | Файлы»
@@ -170,10 +170,13 @@ struct HomeView: View {
         }
         .preference(key: FilesNavigationDepthKey.self, value: path.count)
         .sensoryFeedback(.success, trigger: areHiddenFoldersRevealed)
-        .onChange(of: scenePhase) { _, newPhase in
-            if newPhase != .active {
-                hideSuperHiddenFolders()
-            }
+        // Скрытые папки открыли знаком или паролем в настройках — на экране корень с ними
+        .onChange(of: hiddenFolders.revealCount) { _, _ in
+            path = .init()
+            showToast("Скрытые папки открыты")
+        }
+        .onChange(of: hiddenFolders.isRevealed) { _, isRevealed in
+            if !isRevealed { toast = nil }
         }
     }
 
@@ -280,7 +283,7 @@ struct HomeView: View {
 
         if hides, !areHiddenFoldersRevealed {
             // Папка только что исчезла с экрана — объясняем, как вернуть
-            showToast("Папка скрыта — откройте жестом Z")
+            showToast("Папка скрыта — откройте \(hiddenFolders.hasCustomSymbol ? "своим знаком" : "жестом Z")")
         } else {
             showToast(hides ? "Папка скрыта" : "Папка снова на главном")
         }
@@ -303,99 +306,6 @@ struct HomeView: View {
                 toast = nil
             }
         }
-    }
-
-    private func zGesture(in size: CGSize) -> some Gesture {
-        // Порог больше, чем у свайпа страниц (~10 pt): начавшись первым, жест Z
-        // не давал свайпу от края вернуться к чату. Точка начала Z от порога
-        // не зависит — DragGesture помнит её с касания
-        DragGesture(minimumDistance: 20, coordinateSpace: .local)
-            .onChanged { value in
-                guard !areHiddenFoldersRevealed else { return }
-                if zGesturePoints.isEmpty {
-                    zGesturePoints.append(value.startLocation)
-                }
-                zGesturePoints.append(value.location)
-            }
-            .onEnded { _ in
-                defer { zGesturePoints.removeAll(keepingCapacity: true) }
-                // Поверх выдачи жест не нужен: суперскрытые папки в поиск не входят
-                guard !areHiddenFoldersRevealed, !isSearching,
-                      store.folders.contains(where: \.isSuperHidden),
-                      ZGestureRecognizer.matches(points: zGesturePoints, in: size) else { return }
-
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
-                    areHiddenFoldersRevealed = true
-                }
-                showToast("Скрытые папки открыты")
-            }
-    }
-
-    private func hideSuperHiddenFolders() {
-        areHiddenFoldersRevealed = false
-        toast = nil
-        zGesturePoints.removeAll(keepingCapacity: true)
-    }
-}
-
-/// Проверяет, что единый свайп образует три штриха Z и занимает центральную часть экрана.
-enum ZGestureRecognizer {
-    static func matches(points: [CGPoint], in size: CGSize) -> Bool {
-        guard points.count >= 8, size.width > 0, size.height > 0 else { return false }
-
-        let minX = points.map(\.x).min() ?? 0
-        let maxX = points.map(\.x).max() ?? 0
-        let minY = points.map(\.y).min() ?? 0
-        let maxY = points.map(\.y).max() ?? 0
-        let width = maxX - minX
-        let height = maxY - minY
-        let center = CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
-
-        guard width >= size.width * 0.32,
-              height >= max(60, size.height * 0.09),
-              height <= size.height * 0.45,
-              center.x >= size.width * 0.25,
-              center.x <= size.width * 0.75,
-              center.y >= size.height * 0.24,
-              center.y <= size.height * 0.76 else { return false }
-
-        func normalized(_ point: CGPoint) -> CGPoint {
-            CGPoint(x: (point.x - minX) / width, y: (point.y - minY) / height)
-        }
-
-        let normalizedPoints = points.map(normalized)
-        guard let start = normalizedPoints.first,
-              let end = normalizedPoints.last,
-              start.x <= 0.28,
-              start.y <= 0.30,
-              end.x >= 0.72,
-              end.y >= 0.70 else { return false }
-
-        let lastIndex = normalizedPoints.count - 1
-        let firstSearchEnd = max(2, Int(Double(lastIndex) * 0.68))
-        guard let topRightIndex = (1...firstSearchEnd).max(by: {
-            normalizedPoints[$0].x - normalizedPoints[$0].y * 0.35
-                < normalizedPoints[$1].x - normalizedPoints[$1].y * 0.35
-        }), topRightIndex < lastIndex - 2 else { return false }
-
-        guard let bottomLeftIndex = ((topRightIndex + 1)..<lastIndex).max(by: {
-            (1 - normalizedPoints[$0].x) + normalizedPoints[$0].y
-                < (1 - normalizedPoints[$1].x) + normalizedPoints[$1].y
-        }) else { return false }
-
-        let topRight = normalizedPoints[topRightIndex]
-        let bottomLeft = normalizedPoints[bottomLeftIndex]
-
-        return topRight.x >= 0.72
-            && topRight.y <= 0.38
-            && bottomLeft.x <= 0.30
-            && bottomLeft.y >= 0.62
-            && bottomLeftIndex < lastIndex - 1
-            && topRight.x - start.x >= 0.50
-            && bottomLeft.x - topRight.x <= -0.45
-            && bottomLeft.y - topRight.y >= 0.42
-            && end.x - bottomLeft.x >= 0.45
-            && abs(end.y - bottomLeft.y) <= 0.30
     }
 }
 

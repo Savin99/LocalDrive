@@ -3,7 +3,9 @@ import SwiftUI
 @main
 struct LocalDriveApp: App {
     @State private var store: VaultStore
+    /// Подтверждение владельца перед показом номера в чате
     @State private var lock = LockManager()
+    @State private var hiddenFolders = HiddenFolders()
     @State private var backup: BackupManager
     @State private var search: SearchService
     @State private var models = ChatModelStore()
@@ -16,10 +18,13 @@ struct LocalDriveApp: App {
         _store = State(initialValue: store)
         _backup = State(initialValue: BackupManager(vaultURL: store.rootURL))
         _search = State(initialValue: search)
-        // Переписка живёт, пока работает приложение: блокировка при уходе в фон
-        // убирает экран, но не стирает её. Владелец 12.10.2026: чат пропадал
-        // после каждого выхода — даже чтобы вставить скопированный номер
+        // Переписка живёт, пока работает приложение: уход в фон её не стирает.
+        // Владелец 12.10.2026: чат пропадал после каждого выхода — даже чтобы
+        // вставить скопированный номер
         _chat = State(initialValue: ChatSession(search: search))
+        // Код входа больше не спрашивается — его хеш не нужен. Четыре цифры
+        // перебираются мгновенно, а код мог совпадать с другими
+        SecretStore.legacyPin.delete()
     }
 
     var body: some Scene {
@@ -27,6 +32,7 @@ struct LocalDriveApp: App {
             RootView()
                 .environment(store)
                 .environment(lock)
+                .environment(hiddenFolders)
                 .environment(backup)
                 .environment(search)
                 .environment(models)
@@ -35,9 +41,9 @@ struct LocalDriveApp: App {
                 .onChange(of: scenePhase) { _, newPhase in
                     switch newPhase {
                     case .background:
-                        // Автоблокировка при уходе приложения в фон. Номера в
-                        // переписке снова под маской — до нового Face ID
-                        lock.lock()
+                        // Уход в фон снова прячет скрытые папки, а номера
+                        // в переписке — под маску до нового Face ID
+                        hiddenFolders.hide()
                         chat.revealsSensitive = false
                         // База индекса защищена как файлы: на заблокированном
                         // iPhone она недоступна, поэтому распознавание встаёт
@@ -47,8 +53,6 @@ struct LocalDriveApp: App {
                         models.suspend()
                     case .active:
                         search.resume()
-                        // Сканируем лицо сразу при возврате — без нажатия кнопки
-                        Task { await lock.autoUnlock() }
                     default:
                         break
                     }

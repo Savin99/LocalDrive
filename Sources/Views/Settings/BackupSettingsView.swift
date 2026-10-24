@@ -358,7 +358,7 @@ private struct BackupHistoryView: View {
                 Text("После ввода кода восстановления текущее локальное хранилище будет заменено выбранной копией.")
             }
             .sheet(item: $restoreSummary) { summary in
-                RestoreBackupView(allowsEmptyStart: false, targetSummary: summary)
+                RestoreBackupView(targetSummary: summary)
             }
         }
     }

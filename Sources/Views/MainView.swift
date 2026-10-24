@@ -1,17 +1,18 @@
 import SwiftUI
 import UIKit
 
-// Главный экран после входа: две страницы — чат по документам и библиотека
-// папок. Переключатель «Чат | Файлы» вверху, между страницами можно листать
+// Главный экран: две страницы — чат по документам и библиотека папок.
+// Переключатель «Чат | Файлы» вверху, между страницами можно листать
 // свайпом (решение владельца от 12.10.2026: нижние вкладки занимали много
-// места). Сессия чата живёт в LocalDriveApp: блокировка убирает этот экран,
-// а переписка остаётся в памяти до перезапуска приложения. На диск она не пишется
+// места). Сессия чата живёт в LocalDriveApp: переписка остаётся в памяти
+// до перезапуска приложения. На диск она не пишется
 struct MainView: View {
     @Environment(VaultStore.self) private var store
     @Environment(BackupManager.self) private var backup
     @Environment(SearchService.self) private var search
     @Environment(ChatModelStore.self) private var models
     @Environment(ChatSession.self) private var chat
+    @Environment(HiddenFolders.self) private var hiddenFolders
 
     @State private var page = MainPage.chat
     /// Сдвиг страниц за пальцем во время свайпа
@@ -27,8 +28,9 @@ struct MainView: View {
     /// горизонтальный свайп листает подсказки, а не страницы
     @State private var composerHeight: CGFloat = 0
 
-    /// С «Файлов» обратно к чату — только от левого края: внутри страницы
-    /// живут секретный жест Z и горизонтальная лента «Недавнее»
+    /// С «Файлов» к чату за пальцем — от левого края. Из любого другого места
+    /// свайп листает по отпусканию (FilesStrokeGesture): штрих там может
+    /// оказаться секретным знаком
     private static let edgeWidth: CGFloat = 24
     private static let space = "pager"
     private static let settle = Animation.spring(response: 0.35, dampingFraction: 0.86)
@@ -62,6 +64,7 @@ struct MainView: View {
             .frame(width: width, alignment: .leading)
             .offset(x: -CGFloat(page.index) * width + dragOffset)
             .gesture(pagingGesture(width: width, height: proxy.size.height))
+            .gesture(filesStroke)
             .overlay(alignment: .top) {
                 ZStack {
                     // Внутри папки переключателя нет совсем: прозрачный
@@ -95,6 +98,8 @@ struct MainView: View {
             backup.scheduleAutomaticBackup()
             search.scheduleReconcile()
         }
+        // Скрытые папки открыли паролем в настройках — показываем их
+        .onChange(of: hiddenFolders.revealCount) { _, _ in select(.files) }
     }
 
     /// 0 — чат, 1 — «Файлы»; во время свайпа дробное: капсула идёт за пальцем
@@ -135,6 +140,25 @@ struct MainView: View {
             settle(on: target)
         } onCancel: {
             settle(on: page)
+        }
+    }
+
+    /// Штрих по корню «Файлов»: знак открывает скрытые папки, прямой свайп
+    /// вправо возвращает к чату
+    private var filesStroke: FilesStrokeGesture {
+        FilesStrokeGesture(edgeWidth: Self.edgeWidth) {
+            page == .files && filesDepth == 0 && !isDragging && !isSettling
+        } onEnd: { stroke in
+            if store.folders.contains(where: \.isSuperHidden) {
+                var recognized = false
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                    recognized = hiddenFolders.revealIfRecognized(stroke.points, in: stroke.screen)
+                }
+                if recognized { return }
+            }
+            if stroke.returnsToChat {
+                settle(on: .chat)
+            }
         }
     }
 

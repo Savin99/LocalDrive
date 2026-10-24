@@ -1,10 +1,12 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Environment(LockManager.self) private var lock
+    @Environment(HiddenFolders.self) private var hiddenFolders
     @Environment(SearchService.self) private var search
+    @Environment(VaultStore.self) private var store
     @Environment(\.dismiss) private var dismiss
-    @State private var isChangingPin = false
+    @State private var showsRestore = false
+    @State private var confirmsRestore = false
 
     var body: some View {
         NavigationStack {
@@ -16,18 +18,45 @@ struct SettingsView: View {
                         Label("Защита и восстановление", systemImage: "lock.shield.fill")
                     }
 
+                    // Раньше восстановление предлагал первый запуск, пока
+                    // придумывали код входа. Кода больше нет — вход здесь
                     Button {
-                        isChangingPin = true
+                        if store.folders.isEmpty {
+                            showsRestore = true
+                        } else {
+                            confirmsRestore = true
+                        }
                     } label: {
-                        Label("Сменить код", systemImage: "key.fill")
+                        Label("Восстановить из копии", systemImage: "icloud.and.arrow.down")
                     }
+                    .accessibilityIdentifier("restore-files")
+                }
 
-                    Button {
-                        dismiss()
-                        lock.lock()
+                Section {
+                    NavigationLink {
+                        HiddenSymbolSettingsView()
                     } label: {
-                        Label("Заблокировать сейчас", systemImage: "lock.fill")
+                        LabeledContent {
+                            Text(hiddenFolders.hasCustomSymbol ? "Свой" : "Встроенный")
+                        } label: {
+                            Label("Знак", systemImage: "scribble")
+                        }
                     }
+                    .accessibilityIdentifier("settingsHiddenSymbol")
+
+                    NavigationLink {
+                        HiddenPasswordRevealView { dismiss() }
+                    } label: {
+                        Label("Открыть по паролю", systemImage: "key.fill")
+                    }
+                    .disabled(!hiddenFolders.hasPassword)
+                    .accessibilityIdentifier("settingsHiddenPassword")
+                } header: {
+                    Text("Скрытые папки")
+                } footer: {
+                    Text(hiddenFolders.hasPassword
+                        ? "Знак рисуют одним движением в любом месте «Файлов». Если не получается — откройте по паролю."
+                        : "Знак рисуют одним движением в любом месте «Файлов». Пароль появится вместе со своим знаком.")
                 }
 
                 Section(DocumentReaderFeature.isEnabled ? "Модели на iPhone" : "Чат") {
@@ -84,8 +113,18 @@ struct SettingsView: View {
                     Button("Готово") { dismiss() }
                 }
             }
-            .sheet(isPresented: $isChangingPin) {
-                ChangePinView()
+            .sheet(isPresented: $showsRestore) {
+                RestoreBackupView()
+            }
+            .confirmationDialog(
+                "Заменить файлы копией?",
+                isPresented: $confirmsRestore,
+                titleVisibility: .visible
+            ) {
+                Button("Продолжить") { showsRestore = true }
+                Button("Отмена", role: .cancel) {}
+            } message: {
+                Text("После ввода кода восстановления папки и файлы на этом iPhone будут заменены копией.")
             }
         }
     }

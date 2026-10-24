@@ -88,14 +88,8 @@ final class FileOperationsUITests: XCTestCase {
 
     // MARK: - Шаги
 
+    /// Кода входа нет: приложение открывается сразу на главном экране
     private func unlock(_ app: XCUIApplication) {
-        if app.staticTexts["Придумайте код"].waitForExistence(timeout: 10) {
-            enterPin(in: app)
-            XCTAssertTrue(app.staticTexts["Повторите код"].waitForExistence(timeout: 5))
-            enterPin(in: app)
-        } else if app.staticTexts["Введите код"].waitForExistence(timeout: 5) {
-            enterPin(in: app)
-        }
         openFilesPage(in: app)
         XCTAssertTrue(app.buttons["Новая папка"].waitForExistence(timeout: 10))
     }
@@ -111,10 +105,6 @@ final class FileOperationsUITests: XCTestCase {
         let tab = app.tabBars.buttons["Файлы"]
         XCTAssertTrue(tab.waitForExistence(timeout: 5), "не нашёл переход к папкам\n" + app.debugDescription)
         tab.tap()
-    }
-
-    private func enterPin(in app: XCUIApplication) {
-        for digit in "1111" { app.buttons[String(digit)].tap() }
     }
 
     private func createFolder(_ name: String, in app: XCUIApplication) {

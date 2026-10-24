@@ -102,25 +102,13 @@ final class FeedDocumentUITests: XCTestCase {
 
     // MARK: - Хелперы
 
+    /// Кода входа нет: приложение открывается сразу на главном экране
     private func unlock(_ app: XCUIApplication) {
-        if app.staticTexts["Придумайте код"].waitForExistence(timeout: 10) {
-            enterPin("1111", in: app)
-            XCTAssertTrue(app.staticTexts["Повторите код"].waitForExistence(timeout: 5))
-            enterPin("1111", in: app)
-        } else if app.staticTexts["Введите код"].waitForExistence(timeout: 5) {
-            enterPin("1111", in: app)
-        }
         // Главная страница — чат, папки — на странице «Файлы»
         let filesPage = app.buttons["pageFiles"]
         XCTAssertTrue(filesPage.waitForExistence(timeout: 10))
         filesPage.tap()
         XCTAssertTrue(app.buttons["Новая папка"].waitForExistence(timeout: 10))
-    }
-
-    private func enterPin(_ pin: String, in app: XCUIApplication) {
-        for digit in pin {
-            app.buttons[String(digit)].tap()
-        }
     }
 
     private func createFeedFolder(named name: String, in app: XCUIApplication) {

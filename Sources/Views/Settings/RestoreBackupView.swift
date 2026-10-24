@@ -1,8 +1,10 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+// Восстановление из зашифрованной копии. Открывается из настроек: строкой
+// «Восстановить из копии» (последняя версия) и из истории копий (выбранная).
+// Раньше его показывал первый запуск, пока там придумывали код входа
 struct RestoreBackupView: View {
-    var allowsEmptyStart = true
     var targetSummary: BackupSummary?
 
     @Environment(BackupManager.self) private var backup
@@ -18,7 +20,6 @@ struct RestoreBackupView: View {
 
     private enum RestoreAlert: String, Identifiable {
         case help
-        case emptyStart
         case restored
 
         var id: String { rawValue }
@@ -129,15 +130,6 @@ struct RestoreBackupView: View {
                         isRestoring
                     )
 
-                    if allowsEmptyStart {
-                        Button("Начать с пустого хранилища") {
-                            activeAlert = .emptyStart
-                        }
-                        .foregroundStyle(Theme.ink)
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
-                        .accessibilityIdentifier("start-empty")
-                    }
                 }
                 .padding(24)
             }
@@ -156,10 +148,9 @@ struct RestoreBackupView: View {
             .navigationTitle("Восстановление файлов")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if allowsEmptyStart {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Отмена") { dismiss() }
-                    }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Отмена") { dismiss() }
+                        .accessibilityIdentifier("restore-cancel")
                 }
             }
             .alert(item: $activeAlert) { alert in
@@ -170,18 +161,11 @@ struct RestoreBackupView: View {
                         message: Text("Это код, который LocalDrive показал при настройке резервной копии. Проверьте приложение «Пароли», менеджер паролей или распечатанную копию."),
                         dismissButton: .cancel(Text("Понятно"))
                     )
-                case .emptyStart:
-                    Alert(
-                        title: Text("Продолжить без восстановления?"),
-                        message: Text("Позже восстановление можно будет запустить из настроек, но оно заменит локальное хранилище данными из копии."),
-                        primaryButton: .destructive(Text("Начать заново")) { dismissAfterAlert() },
-                        secondaryButton: .cancel(Text("Вернуться"))
-                    )
                 case .restored:
                     Alert(
                         title: Text("Файлы восстановлены"),
-                        message: Text("Теперь придумайте PIN для входа на этом iPhone."),
-                        dismissButton: .default(Text("Создать новый код")) { dismissAfterAlert() }
+                        message: Text("Папки и файлы из копии снова на этом iPhone."),
+                        dismissButton: .default(Text("Готово")) { dismissAfterAlert() }
                     )
                 }
             }

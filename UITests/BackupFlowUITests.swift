@@ -5,27 +5,24 @@ final class BackupFlowUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        XCTAssertTrue(app.staticTexts["Придумайте код"].waitForExistence(timeout: 10))
+        // Кода входа нет, и восстановление больше не предлагает первый запуск:
+        // вход в него — в настройках
+        XCTAssertTrue(app.buttons["Настройки"].waitForExistence(timeout: 10))
+        app.buttons["Настройки"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Настройки"].waitForExistence(timeout: 5))
+
         let restoreButton = app.buttons["restore-files"]
-        XCTAssertTrue(restoreButton.isHittable)
-        tap(restoreButton, until: app.navigationBars["Восстановление файлов"])
+        XCTAssertTrue(restoreButton.waitForExistence(timeout: 5))
+        restoreButton.tap()
+        // Если на iPhone уже есть папки, сначала спрашивают, заменить ли их
+        let proceed = app.buttons["Продолжить"]
+        if proceed.waitForExistence(timeout: 2) { proceed.tap() }
+        XCTAssertTrue(app.navigationBars["Восстановление файлов"].waitForExistence(timeout: 5))
         attachScreenshot(named: "restore-entry", app: app)
 
-        let startEmpty = app.buttons["start-empty"]
-        XCTAssertTrue(startEmpty.isHittable)
-        tap(startEmpty, until: app.alerts["Продолжить без восстановления?"])
-        app.alerts.buttons["Начать заново"].tap()
+        tap(app.buttons["restore-cancel"], until: app.navigationBars["Настройки"])
         XCTAssertTrue(waitForDisappearance(app.navigationBars["Восстановление файлов"], timeout: 5))
-        XCTAssertTrue(app.staticTexts["Придумайте код"].waitForExistence(timeout: 5))
-        Thread.sleep(forTimeInterval: 2)
 
-        enterPin("1111", in: app)
-        XCTAssertTrue(app.staticTexts["Повторите код"].waitForExistence(timeout: 5))
-        enterPin("1111", in: app)
-
-        XCTAssertTrue(app.buttons["Настройки"].waitForExistence(timeout: 10))
-        app.buttons["Настройки"].tap()
-        XCTAssertTrue(app.navigationBars["Настройки"].waitForExistence(timeout: 5))
         tap(
             app.buttons["Защита и восстановление"],
             until: app.navigationBars["Защита и восстановление"]
@@ -62,12 +59,6 @@ final class BackupFlowUITests: XCTestCase {
         }
         XCTAssertTrue(continued, "После выбора папки настройка не продолжилась")
         attachScreenshot(named: "backup-setup-continued", app: app)
-    }
-
-    private func enterPin(_ pin: String, in app: XCUIApplication) {
-        for digit in pin {
-            app.buttons[String(digit)].tap()
-        }
     }
 
     private func tap(_ button: XCUIElement, until destination: XCUIElement) {
