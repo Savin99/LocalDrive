@@ -331,45 +331,6 @@ struct ChatRouter {
         return await textSearch(text)
     }
 
-    /// План локальной модели. Исполняется тем же кодом, что и разбор на
-    /// правилах; если план не сработал, отвечает поиск по тексту
-    func reply(
-        plan raw: ChatPlan,
-        text: String,
-        preferring documentID: Int64? = nil
-    ) async -> (ChatReply, [Int64: SearchResult]) {
-        let plan = raw.sanitized()
-        let intent = ChatIntent(plan: plan)
-        let summary = intent.summary
-        onStep?(.understand, summary.isEmpty ? "Модель разобрала вопрос" : "Модель поняла: \(summary)")
-        if let documentID, let reply = await chosen(documentID, intent: intent) { return (reply, [:]) }
-        let query = Self.searchQuery(plan.query, message: text)
-        switch plan.action {
-        case .document:
-            if intent.types.contains(where: \.isPersonal), let reply = await personalDocument(intent) {
-                return (reply, [:])
-            }
-            return await textSearch(query)
-        case .list:
-            if let reply = await documentList(of: plan.types.isEmpty ? [.diploma] : plan.types) {
-                return (reply, [:])
-            }
-            return await textSearch(query)
-        case .search:
-            return await textSearch(query)
-        case .answer:
-            guard let answer = plan.text, !answer.isEmpty else { return await textSearch(text) }
-            // Свой ответ модель может подкрепить документом, о котором речь
-            let related = await search.documents(ofTypes: plan.types).prefix(4).map(\.id)
-            let cards: [ChatCard] = switch related.count {
-            case 0: []
-            case 1: [.document(documentID: related[0])]
-            default: [.fileList(documentIDs: Array(related))]
-            }
-            return (ChatReply(text: answer, cards: cards), [:])
-        }
-    }
-
     /// Пустой ответ объясняет, где чат ищет. Сразу после установки индекс
     /// строится в фоне, и «ничего не нашёл» без этой оговорки выглядит поломкой.
     /// О суперскрытых папках — ни слова: подсказка выдала бы их существование
@@ -378,16 +339,6 @@ struct ChatRouter {
             return "По запросу «\(text)» пока ничего. Я ещё распознаю документы — осталось \(pending). Спросите чуть позже."
         }
         return "Ничего не нашёл по запросу «\(text)». Ищу в тексте файлов и их названиях — в папках, где включено «Доступна для поиска». Попробуйте другое слово."
-    }
-
-    /// Запрос модели для поиска берётся, только если у него есть общая основа
-    /// с сообщением. На стенде модель иногда оставляла его пустым или вписывала
-    /// туда имя соседнего ключа — тогда ищем по самому сообщению
-    static func searchQuery(_ proposed: String?, message: String) -> String {
-        guard let proposed, !proposed.isEmpty else { return message }
-        let stems = Set(SearchText.tokens(in: message).map(\.stem))
-        let shares = SearchText.tokens(in: proposed).contains { stems.contains($0.stem) }
-        return shares ? proposed : message
     }
 
     // MARK: - Личные документы

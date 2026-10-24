@@ -323,13 +323,6 @@ final class ForeignPassportChatTests: XCTestCase {
         XCTAssertTrue(answer.text.contains("паспорт Таджикистана"), answer.text)
     }
 
-    func testModelPlanForRussianPassportStillFindsForeignOwner() async throws {
-        let docs = try await seed()
-        let plan = ChatPlan(action: .document, types: [.passportRU], owner: ["рахимова"])
-        let (answer, _) = await ChatRouter(search: search).reply(plan: plan, text: "паспорт рахимова")
-        XCTAssertEqual(answer.cards.first?.documentIDs, [docs.rahimov.id])
-    }
-
     func testMyPassportListsForeignPassportToo() async throws {
         let docs = try await seed()
         let answer = await reply("мой паспорт")

@@ -101,7 +101,7 @@ struct MainView: View {
         // и в фоне распознаёт новое
         .task { search.reconcile() }
         // Свободные вопросы понимает скачанная модель; без неё чат отвечает правилами
-        .onAppear { chat.usePlanner { [models] in models.currentPlanner } }
+        .onAppear { chat.useAgentModel { [models] in models.currentModel } }
         .onChange(of: store.revision) { _, _ in
             backup.scheduleAutomaticBackup()
             search.scheduleReconcile()

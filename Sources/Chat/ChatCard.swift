@@ -34,10 +34,13 @@ enum ChatCard: Hashable, Sendable {
     case fact(id: UUID, items: [UUID])
     /// Черновик карточки: в «Карточки» попадает по «Сохранить»
     case factProposal(FactCard)
+    /// Исправление поля, которое распознавание прочитало неверно: меняется
+    /// только по кнопке «Исправить»
+    case fieldFix(documentID: Int64, key: String, value: String)
 
     var documentIDs: [Int64] {
         switch self {
-        case .fields(let id, _), .document(let id), .snippet(let id, _), .expiry(let id): [id]
+        case .fields(let id, _), .document(let id), .snippet(let id, _), .expiry(let id), .fieldFix(let id, _, _): [id]
         case .fileList(let ids): ids
         case .clarify, .proposal, .attachment, .fact, .factProposal: []
         }
@@ -91,11 +94,11 @@ struct ChatReply: Hashable, Sendable {
 
 extension ChatCard: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, documentId, documentIds, keys, page, question, options, proposal, attachmentId, factId, itemIds, fact
+        case type, documentId, documentIds, keys, page, question, options, proposal, attachmentId, factId, itemIds, fact, key, value
     }
 
     private enum Kind: String, Codable {
-        case fields, document, fileList, snippet, clarify, expiry, proposal, attachment, fact, factProposal
+        case fields, document, fileList, snippet, clarify, expiry, proposal, attachment, fact, factProposal, fieldFix
     }
 
     /// Идентификатор в JSON — «d42», как в спецификации
@@ -140,6 +143,9 @@ extension ChatCard: Codable {
                          items: try container.decodeIfPresent([UUID].self, forKey: .itemIds) ?? [])
         case .factProposal:
             self = .factProposal(try container.decode(FactCard.self, forKey: .fact))
+        case .fieldFix:
+            self = .fieldFix(documentID: try id(), key: try container.decode(String.self, forKey: .key),
+                             value: try container.decode(String.self, forKey: .value))
         }
     }
 
@@ -180,6 +186,11 @@ extension ChatCard: Codable {
         case .factProposal(let card):
             try container.encode(Kind.factProposal, forKey: .type)
             try container.encode(card, forKey: .fact)
+        case .fieldFix(let id, let key, let value):
+            try container.encode(Kind.fieldFix, forKey: .type)
+            try container.encode(Self.encodeID(id), forKey: .documentId)
+            try container.encode(key, forKey: .key)
+            try container.encode(value, forKey: .value)
         }
     }
 }

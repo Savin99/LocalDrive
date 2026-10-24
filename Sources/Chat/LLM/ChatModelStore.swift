@@ -2,7 +2,7 @@ import Foundation
 import HuggingFace
 import OSLog
 
-// Скачанная модель для чата: выбор, загрузка, удаление и планировщик.
+// Скачанная модель для чата: выбор, загрузка, удаление и модель агента.
 // Скачивание — единственный раз, когда приложение выходит в сеть, и только
 // по кнопке на экране настроек. Дальше модель читается из папки на iPhone
 @MainActor
@@ -18,7 +18,7 @@ final class ChatModelStore {
     private(set) var state: State = .notInstalled
 
     @ObservationIgnored private var downloadTask: Task<Void, Never>?
-    @ObservationIgnored private var planner: LocalModelPlanner?
+    @ObservationIgnored private var loaded: LocalChatModel?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let log = Logger(subsystem: "com.ilyaqa.LocalDrive", category: "chat-model")
 
@@ -57,23 +57,23 @@ final class ChatModelStore {
         return available >= choice.requiredMemoryBytes
     }
 
-    // MARK: - Планировщик для чата
+    // MARK: - Модель для чата
 
-    /// Планировщик установленной модели, если она есть и может работать здесь
-    var currentPlanner: (any ChatPlanning)? {
+    /// Модель для агента чата, если она установлена и может работать здесь
+    var currentModel: (any LocalAgentModel)? {
         guard Self.runsOnThisDevice, case .installed(let choice) = state, let snapshot = snapshotURL else {
             return nil
         }
-        if let planner, planner.choice == choice { return planner }
-        let created = LocalModelPlanner(choice: choice, snapshot: snapshot)
-        planner = created
+        if let loaded, loaded.choice == choice { return loaded }
+        let created = LocalChatModel(choice: choice, snapshot: snapshot)
+        loaded = created
         return created
     }
 
     /// Приложение уходит в фон: генерация останавливается, модель выгружается
     func suspend() {
-        guard let planner else { return }
-        Task { await planner.suspend() }
+        guard let loaded else { return }
+        Task { await loaded.suspend() }
     }
 
     // MARK: - Скачивание
@@ -116,13 +116,13 @@ final class ChatModelStore {
         }
         defaults.set(choice.rawValue, forKey: Key.choice)
         defaults.set(Self.relativePath(of: snapshot), forKey: Key.snapshot)
-        planner = nil
+        loaded = nil
         state = .installed(choice)
     }
 
     func delete() {
-        if let planner { Task { await planner.suspend() } }
-        planner = nil
+        if let loaded { Task { await loaded.suspend() } }
+        loaded = nil
         if let choice = installedChoice { removeFiles(of: choice) }
         defaults.removeObject(forKey: Key.choice)
         defaults.removeObject(forKey: Key.snapshot)

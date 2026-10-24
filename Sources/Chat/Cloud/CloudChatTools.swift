@@ -36,7 +36,8 @@ final class CloudChatTools {
         case "list_expiring": return await listExpiring(arguments)
         case "view_document": return await viewDocument(arguments)
         case "show_cards": return await showCards(arguments, cards: &cards)
-        case "propose_file_actions": return proposeFileActions(arguments, cards: &cards)
+        case "propose_file_actions": return await proposeFileActions(arguments, cards: &cards)
+        case "propose_field_fix": return await proposeFieldFix(arguments, cards: &cards)
         default: return ["error": .string("Нет такого инструмента: \(name)")]
         }
     }
@@ -60,11 +61,17 @@ final class CloudChatTools {
         let fields = await search.fields(for: ids)
         let metadata = await search.metadata(for: ids)
         var documents: [CloudJSON] = []
+        // Владелец сужает поиск, но не теряет найденное: у свидетельства о
+        // браке и договора поля «владелец» нет (стенд агента, 24.10.2026)
+        let owned = owner.isEmpty ? [] : results.filter { result in
+            result.documentID.map { id in ChatRouter.nameMatches(owner, owner: fields[id]?.first { $0.key == FieldKey.fullName }?.value ?? "") } ?? false
+        }
+        let filterByOwner = !owned.isEmpty
         for result in results {
             guard let id = result.documentID else { continue }
             if !types.isEmpty, !types.contains(result.type) { continue }
             let name = fields[id]?.first { $0.key == FieldKey.fullName }?.value ?? ""
-            if !owner.isEmpty, !ChatRouter.nameMatches(owner, owner: name) { continue }
+            if filterByOwner, !ChatRouter.nameMatches(owner, owner: name) { continue }
             remember(fields[id] ?? [])
             var summary = summary(id: id, title: result.file.name, type: result.type, folder: result.folder, owner: name)
             if let snippet = result.snippet { summary["snippet"] = .string(clean(String(snippet.characters), fields: fields[id] ?? [])) }
@@ -243,11 +250,25 @@ final class CloudChatTools {
         return summary
     }
 
-    /// Выдержка для модели: без строк MRZ и без номеров документа
+    /// Выдержка для модели: без строк MRZ и без номеров документа. Выдержка
+    /// поиска — одна строка, где MRZ идёт вперемешку с текстом: построчный
+    /// фильтр её пропускал, и номер паспорта уходил модели целиком (нашёл тест
+    /// агента 24.10.2026). Поэтому MRZ вырезается и по словам
     private func clean(_ text: String, fields: [DocumentField]) -> String {
-        let lines = text.components(separatedBy: .newlines).filter { !MRZNameReader.looksLikeMRZ($0) }
+        let lines = text.components(separatedBy: .newlines)
+            .filter { !MRZNameReader.looksLikeMRZ($0) }
+            .map { line in line.split(separator: " ", omittingEmptySubsequences: false).filter { !Self.looksLikeMRZFragment($0) }.joined(separator: " ") }
         let numbers = Set(fields.filter { $0.key == FieldKey.seriesNumber }.map { $0.value.filter(\.isNumber) })
         return CloudChatMask.apply(lines.joined(separator: "\n"), sensitive: numbers)
+    }
+
+    /// Кусок машиночитаемой строки: заполнитель «<» или длинное слово из
+    /// латиницы и цифр, где цифр не меньше шести
+    static func looksLikeMRZFragment(_ word: Substring) -> Bool {
+        if word.contains("<") { return true }
+        guard word.count >= 10 else { return false }
+        let mrz = word.allSatisfy { $0.isASCII && ($0.isUppercase || $0.isNumber) }
+        return mrz && word.filter(\.isNumber).count >= 6
     }
 
     private func remember(_ fields: [DocumentField]) {
@@ -277,11 +298,56 @@ final class CloudChatTools {
         return ["shown": .number(Double(shown))]
     }
 
-    private func proposeFileActions(_ arguments: CloudJSON, cards: inout [ChatCard]) -> CloudJSON {
-        // ЗАГЛУШКА до агента B: без FileProposalBuilder предложений нет
+    /// Файл можно назвать id документа из описи: {"document_id": "d32"} вместо
+    /// папки и точного имени. Модель видит в описи название документа, а не
+    /// имя файла, и на стенде агента переносила «Договор аренды квартиры»,
+    /// которого как файла нет (24.10.2026)
+    private func resolvingDocuments(_ arguments: CloudJSON) async -> CloudJSON {
+        func resolve(_ file: CloudJSON) async -> CloudJSON {
+            guard let raw = file["document_id"]?.string, let id = ChatCard.decodeID(raw),
+                  let document = await search.documents(ids: [id]).first else { return file }
+            return ["folder_id": .string(document.folderID.uuidString), "name": .string(document.fileName)]
+        }
+        guard var object = arguments.object, let actions = arguments["actions"]?.array else { return arguments }
+        var resolved: [CloudJSON] = []
+        for action in actions {
+            guard var fields = action.object else { resolved.append(action); continue }
+            if let files = fields["files"]?.array {
+                var list: [CloudJSON] = []
+                for file in files { list.append(await resolve(file)) }
+                fields["files"] = .array(list)
+            }
+            if let file = fields["file"] { fields["file"] = await resolve(file) }
+            resolved.append(.object(fields))
+        }
+        object["actions"] = .array(resolved)
+        return .object(object)
+    }
+
+    /// Поправка поля, распознанного с ошибкой: карточка «было → станет».
+    /// Поле меняется только по кнопке человека
+    private func proposeFieldFix(_ arguments: CloudJSON, cards: inout [ChatCard]) async -> CloudJSON {
+        guard let raw = arguments["document_id"]?.string, let id = ChatCard.decodeID(raw),
+              await !search.documents(ids: [id]).isEmpty else { return ["error": "Документ не найден"] }
+        guard let key = arguments["key"]?.string, FieldKey.order.contains(key) else { return ["error": "Нет такого поля"] }
+        guard let value = arguments["value"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return ["error": "Нужно правильное значение целиком"]
+        }
+        var normalized = ChatFieldFix.isDate(key) ? (ChatFieldFix.normalizedDate(value) ?? value) : value
+        // «Трошкина» вместо ФИО целиком — это фамилия: имя и отчество остаются
+        if key == FieldKey.fullName, !normalized.contains(" "),
+           let current = await search.fields(for: [id])[id]?.first(where: { $0.key == key })?.value {
+            let fix = ChatFieldFix(key: key, namePart: .surname, answer: normalized)
+            normalized = fix.resolvedValue(current: current) ?? normalized
+        }
+        cards.append(.fieldFix(documentID: id, key: key, value: normalized))
+        return ["shown": true, "note": "Карточка показана. Исправит человек кнопкой."]
+    }
+
+    private func proposeFileActions(_ arguments: CloudJSON, cards: inout [ChatCard]) async -> CloudJSON {
         guard let proposals else { return ["error": "Действия с файлами пока недоступны в этой сборке"] }
         do {
-            cards.append(try proposals(arguments.data))
+            cards.append(try proposals(await resolvingDocuments(arguments).data))
             return ["proposed": true, "note": "Ничего не изменится, пока человек не нажмёт «Выполнить»"]
         } catch {
             return ["error": .string("Предложение не собралось: \(error.localizedDescription)")]
@@ -368,6 +434,7 @@ enum CloudChatPrompt {
     Паспорт РФ хранится разворотами — отдельными документами в одной папке: прописка, брак, дети — на других разворотах (other_pages в get_document, в списке документов — рядом).
     Если вопрос неоднозначный — например, подходят паспорта разных людей, — покажи карточку clarify с вариантами.
     Файлы сам не меняешь: чтобы положить вложение, перенести, переименовать файл или создать папку, вызови propose_file_actions — человек подтвердит кнопкой.
+    Человек говорит, что поле распознано с ошибкой («в фамилии ошибка», «дата рождения неправильная»), — вызови propose_field_fix с правильным значением целиком; если его не назвали — спроси. Поле исправит человек кнопкой.
     Вложения из сообщения ты видишь как картинки; их id — a1, a2…, они перечислены в тексте сообщения. Предлагай, в какую папку их положить и как назвать.
     Если нужный документ есть в списке документов ниже, сразу вызови show_cards — без поиска. Короткий текст ответа пиши в том же ходе, что и show_cards.
     Краткие итоги своих рассуждений пиши по-русски.
@@ -485,6 +552,19 @@ enum CloudChatPrompt {
             ],
         ],
         [
+            "name": "propose_field_fix",
+            "description": "Исправить поле документа, которое распознавание прочитало неверно. Показывает «было → станет»; поле меняется, только когда человек нажмёт «Исправить».",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "document_id": ["type": "string", "description": "id документа, например d42"],
+                    "key": ["type": "string", "enum": fieldKeys],
+                    "value": ["type": "string", "description": "Правильное значение целиком: ФИО полностью, дата ДД.ММ.ГГГГ"],
+                ],
+                "required": ["document_id", "key", "value"],
+            ],
+        ],
+        [
             "name": "propose_file_actions",
             "description": "Предложить действия с файлами. Ничего не меняется, пока человек не нажмёт «Выполнить» на карточке.",
             "parameters": [
@@ -507,13 +587,15 @@ enum CloudChatPrompt {
                                 "new_name": ["type": "string"],
                                 "file": [
                                     "type": "object",
-                                    "properties": ["folder_id": ["type": "string"], "name": ["type": "string"]],
+                                    "properties": ["document_id": ["type": "string", "description": "id документа из описи — вместо папки и имени"],
+                                                   "folder_id": ["type": "string"], "name": ["type": "string"]],
                                 ],
                                 "files": [
                                     "type": "array",
                                     "items": [
                                         "type": "object",
-                                        "properties": ["folder_id": ["type": "string"], "name": ["type": "string"]],
+                                        "properties": ["document_id": ["type": "string", "description": "id документа из описи — вместо папки и имени"],
+                                                       "folder_id": ["type": "string"], "name": ["type": "string"]],
                                     ],
                                 ],
                             ],

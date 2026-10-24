@@ -173,7 +173,7 @@ final class CloudChatTests: XCTestCase {
         let names = Set(json["tools"]?.array?.first?["functionDeclarations"]?.array?.compactMap { $0["name"]?.string } ?? [])
         // С 24.10.2026 — и инструменты «Карточек»
         XCTAssertEqual(names, ["search_documents", "list_documents", "list_folders", "list_files", "get_document",
-                               "view_document", "list_expiring", "show_cards", "propose_file_actions",
+                               "view_document", "list_expiring", "show_cards", "propose_field_fix", "propose_file_actions",
                                "find_fact_cards", "show_fact_card", "propose_fact_card"])
         let thinking = json["generationConfig"]?["thinkingConfig"]
         XCTAssertEqual(thinking?["includeThoughts"]?.bool, true)
@@ -370,7 +370,7 @@ final class CloudChatTests: XCTestCase {
 
         let tools = try XCTUnwrap(json["tools"]?.array)
         XCTAssertEqual(Set(tools.compactMap { $0["name"]?.string }), ["search_documents", "list_documents", "list_folders", "list_files",
-                                                                     "get_document", "view_document", "list_expiring", "show_cards", "propose_file_actions",
+                                                                     "get_document", "view_document", "list_expiring", "show_cards", "propose_field_fix", "propose_file_actions",
                                                                      "find_fact_cards", "show_fact_card", "propose_fact_card"])
         for tool in tools {
             XCTAssertEqual(tool["type"]?.string, "function")

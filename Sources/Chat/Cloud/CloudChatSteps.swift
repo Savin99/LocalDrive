@@ -32,6 +32,9 @@ enum CloudChatSteps {
             return (.open, "Готовлю карточки")
         case "propose_file_actions":
             return (.propose, "Готовлю, куда разложить файлы")
+        case "propose_field_fix":
+            let field = arguments["key"]?.string.map(FieldKey.title) ?? "поле"
+            return (.open, "Готовлю исправление: «\(field)»")
         case "find_fact_cards":
             let query = masked(arguments["query"]?.string ?? "")
             return (.search, query.isEmpty ? "Смотрю «Карточки»" : "Ищу в «Карточках»: «\(query)»")

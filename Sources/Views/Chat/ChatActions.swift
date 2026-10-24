@@ -20,6 +20,8 @@ struct ChatActions {
     var edit: @MainActor (_ document: ChatDocument, _ field: DocumentField) -> Void = { _, _ in }
     /// Отметить поле как сверенное с фото
     var verify: @MainActor (_ document: ChatDocument, _ field: DocumentField) async -> Void = { _, _ in }
+    /// Исправить поле по просьбе в чате: значение становится ручным
+    var fixField: @MainActor (_ document: ChatDocument, _ key: String, _ value: String) async -> Void = { _, _, _ in }
     /// Поставить напоминание о сроке; вернуть текст подтверждения или ошибки
     var remind: @MainActor (_ document: ChatDocument, _ validity: DocumentValidity) async -> String = { _, _ in "" }
 }
@@ -73,6 +75,8 @@ struct ChatCardView: View {
             FactCardView(card: card, highlighted: highlighted)
         case .factProposal(let draft):
             FactProposalCardView(draft: draft)
+        case .fieldFix(let document, let key, let value):
+            FieldFixCardView(document: document, key: key, value: value)
         }
     }
 }

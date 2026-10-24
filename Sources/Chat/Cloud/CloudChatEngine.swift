@@ -185,7 +185,7 @@ final class CloudChatEngine {
     static let maxRounds = 6
     /// Инструменты, после которых ответ готов: карточки и предложение показаны,
     /// лишний раунд за финальным текстом не нужен
-    static let terminalTools: Set<String> = ["show_cards", "propose_file_actions", "show_fact_card", "propose_fact_card"]
+    static let terminalTools: Set<String> = ["show_cards", "propose_file_actions", "show_fact_card", "propose_fact_card", "propose_field_fix"]
 
     /// Опись документов для системной инструкции: id, вид, название, владелец,
     /// папка — без номеров. Стабильный префикс запроса: на нём работает кэш

@@ -41,6 +41,8 @@ struct ResolvedCard: Identifiable {
         case fact(FactCard, highlighted: Set<UUID>)
         /// Черновик карточки — «Сохранить» кладёт его в «Карточки»
         case factProposal(FactCard)
+        /// Исправление поля: документ, поле и новое значение
+        case fieldFix(ChatDocument, key: String, value: String)
     }
 
     let id = UUID()
@@ -113,6 +115,9 @@ struct ChatCardResolver {
             case .factProposal(let draft):
                 guard !draft.items.isEmpty else { return nil }
                 return ResolvedCard(card: card, content: .factProposal(draft))
+            case .fieldFix(let id, let key, let value):
+                guard let document = documents[id], FieldKey.order.contains(key), !value.isEmpty else { return nil }
+                return ResolvedCard(card: card, content: .fieldFix(document, key: key, value: value))
             }
         }
     }
@@ -135,9 +140,6 @@ final class ChatSession {
         var text: String
         var cards: [ResolvedCard] = []
         var isPending = false
-        /// План, по которому собран ответ: модели или правил. Его видит
-        /// модель в истории, когда человек уточняет вопрос
-        var plan: ChatPlan?
         /// Итог рассуждения облачной модели — уже с маской номеров
         var thoughts = ""
         /// Сколько модель думала до первого слова ответа
@@ -170,11 +172,12 @@ final class ChatSession {
     private(set) var answeringInCloud = false
 
     @ObservationIgnored private let search: SearchService
-    /// Планировщик скачанной модели. Спрашивается при каждом вопросе: модель
+    /// Модель на iPhone для агента. Спрашивается при каждом вопросе: модель
     /// могли скачать или удалить, пока экран открыт
-    @ObservationIgnored private var planner: @MainActor () -> (any ChatPlanning)?
-    /// Сколько ждать модель, прежде чем ответить правилами
-    @ObservationIgnored private let plannerTimeout: Duration
+    @ObservationIgnored private var agentModel: @MainActor () -> (any LocalAgentModel)?
+    /// Сколько ждать агента на iPhone целиком, со всеми шагами, прежде чем
+    /// ответить правилами
+    @ObservationIgnored private let agentTimeout: Duration
     /// Облачный чат: одна переписка на сессию, только в памяти
     @ObservationIgnored private var cloudEngine: CloudChatEngine?
     @ObservationIgnored private let cloudSession: URLSession
@@ -196,6 +199,8 @@ final class ChatSession {
     @ObservationIgnored private var store: VaultStore?
     /// «Карточки»: факты, которых нет в документах, — «дом Камилы»
     @ObservationIgnored private(set) var facts: FactStore?
+    /// Чат спросил «как правильно?»: следующий ответ — новое значение поля
+    @ObservationIgnored private var pendingFix: (documentID: Int64, key: String, namePart: ChatFieldFix.NamePart?)?
     /// Что разбор прочитал во вложениях: вид и поля. По ним чат отвечает на
     /// «какой день рождения у этого человека», пока файл не разложен по папкам
     /// и в базе его нет. Только в памяти, как и переписка
@@ -206,16 +211,16 @@ final class ChatSession {
 
     init(
         search: SearchService,
-        planner: @escaping @MainActor () -> (any ChatPlanning)? = { nil },
-        plannerTimeout: Duration = .seconds(10),
+        agentModel: @escaping @MainActor () -> (any LocalAgentModel)? = { nil },
+        agentTimeout: Duration = .seconds(45),
         cloudSession: URLSession = .shared,
         cloudTimeout: Duration = .seconds(60),
         cloudSilence: Duration = .seconds(20),
         inbox: ChatAttachmentInbox? = nil
     ) {
         self.search = search
-        self.planner = planner
-        self.plannerTimeout = plannerTimeout
+        self.agentModel = agentModel
+        self.agentTimeout = agentTimeout
         self.cloudSession = cloudSession
         self.cloudTimeout = cloudTimeout
         self.cloudSilence = cloudSilence
@@ -245,9 +250,9 @@ final class ChatSession {
         genuiHooks = hooks
     }
 
-    /// Хранилище модели приходит из окружения экрана — уже после создания сессии
-    func usePlanner(_ planner: @escaping @MainActor () -> (any ChatPlanning)?) {
-        self.planner = planner
+    /// Модель на iPhone приходит из окружения экрана — уже после создания сессии
+    func useAgentModel(_ model: @escaping @MainActor () -> (any LocalAgentModel)?) {
+        agentModel = model
     }
 
     /// `documentID` — чип уточнения указал документ, его и показываем.
@@ -255,7 +260,6 @@ final class ChatSession {
     func send(_ text: String, documentID: Int64? = nil, attachments: [CloudChatAttachment] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty, !isAnswering else { return }
-        let history = turns()
         let context = contextDocumentIDs()
         // Прошлый вопрос — для уточнений «а загран?», «а у Ольги?»
         let previous = messages.last { $0.role == .user && !$0.text.isEmpty }?.text
@@ -263,7 +267,7 @@ final class ChatSession {
         let pending = Message(role: .assistant, text: "", isPending: true)
         messages.append(pending)
         // Чип указал документ — отвечают правила: выбор уже сделан
-        let model = documentID == nil ? planner() : nil
+        let model = documentID == nil ? agentModel() : nil
         // Облако — если выбрано на поле ввода, включено и с ключом
         let cloud = search.cloud
         // Выключенный облачный чат — не сбой: чип и так показывает «iPhone»
@@ -304,6 +308,12 @@ final class ChatSession {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
+            // «В фамилии ошибка», «исправь дату рождения на 12.05.1985» —
+            // карточка «было → станет» с кнопкой «Исправить»
+            if documentID == nil, attachments.isEmpty, let reply = await self.fieldFixReply(trimmed, context: context, steps: steps) {
+                await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
+                return
+            }
             // «Какой день рождения у этого человека?» сразу после вложения:
             // файла ещё нет в базе, но его разбор знает поля
             if documentID == nil, attachments.isEmpty, let reply = await self.attachmentAnswer(trimmed, steps: steps) {
@@ -326,7 +336,6 @@ final class ChatSession {
                     if !cards.isEmpty, let index = messages.firstIndex(where: { $0.id == pending.id }) {
                         messages[index].text = local.0.text
                         messages[index].cards = cards
-                        messages[index].plan = ChatPlan(rulesFor: trimmed)
                         messages[index].isPending = false
                         // Облако должно знать, что показано: «а адрес?» — о нём
                         if let configuration {
@@ -349,8 +358,11 @@ final class ChatSession {
             } else if wantsCloud {
                 notice = Self.cloudNotice
             }
-            let (reply, hits, plan) = await answer(trimmed, documentID: documentID, context: context, history: history,
-                                                   model: model, rules: rules, steps: steps)
+            // Облака нет — думает агент на iPhone, если модель скачана
+            if configuration == nil, let model, await self.answerWithLocalAgent(trimmed, model: model, pending: pending.id, steps: steps) {
+                return
+            }
+            let (reply, hits) = await answer(trimmed, documentID: documentID, context: context, rules: rules, steps: steps)
             let cards = await ChatCardResolver(search: search, facts: facts).resolve(reply.cards, hits: hits)
             if configuration != nil {
                 cloudEngine?.record(question: trimmed, answer: Self.summary(of: reply.cards))
@@ -362,7 +374,6 @@ final class ChatSession {
                 : reply.text
             messages[index].text = text
             messages[index].cards = cards
-            messages[index].plan = plan
             messages[index].notice = notice
             messages[index].thoughts = ""
             messages[index].isPending = false
@@ -470,7 +481,6 @@ final class ChatSession {
         guard let index = messages.firstIndex(where: { $0.id == pending }) else { return }
         messages[index].text = local.reply.text
         messages[index].cards = cards
-        messages[index].plan = ChatPlan(rulesFor: question)
         messages[index].ownerSuggestion = local.suggestion
         messages[index].isPending = false
         if let configuration {
@@ -561,6 +571,8 @@ final class ChatSession {
     }
 
     func reset() {
+        // Разговор агента на iPhone тоже с нуля
+        if let model = agentModel() { Task { await model.resetAgent() } }
         messages.removeAll()
         attachmentReadings.removeAll()
         revealsSensitive = false
@@ -652,6 +664,92 @@ final class ChatSession {
             messages[index].thoughts = ""
             messages[index].isPending = false
         }
+    }
+
+    // MARK: - Исправление поля
+
+    /// Поправка поля, которое распознавание прочитало неверно. nil — это не
+    /// поправка: обычный вопрос идёт дальше
+    private func fieldFixReply(_ text: String, context: [Int64], steps: @escaping ChatStepSink) async -> ChatReply? {
+        var fix: ChatFieldFix
+        var documentID: Int64?
+        if let pending = pendingFix, ChatFieldFix(text) == nil, ChatIntent(text).types.isEmpty, text.count <= 80 {
+            // Ответ на «как правильно?» — само значение
+            fix = ChatFieldFix(key: pending.key, namePart: pending.namePart, answer: text)
+            documentID = pending.documentID
+        } else if let parsed = ChatFieldFix(text) {
+            fix = parsed
+        } else {
+            pendingFix = nil
+            return nil
+        }
+        pendingFix = nil
+        if documentID == nil { documentID = await fixTarget(fix, text: text, context: context) }
+        guard let documentID, let document = await search.documents(ids: [documentID]).first else {
+            // «Не паспорт, а справка» без документа в разговоре — не поправка
+            guard fix.key != nil else { return nil }
+            return ChatReply(text: "Какой документ поправить? Откройте его в чате — например, «паспорт Ольги», — и скажите, что исправить.",
+                             cards: [], isConfident: true)
+        }
+        let fields = await search.fields(for: [documentID])[documentID] ?? []
+        // Поле не названо: «не Трошина, а Трошкина» — то, где есть старое значение
+        if fix.key == nil, let replacing = fix.replacing {
+            guard let field = fields.first(where: { $0.value.localizedCaseInsensitiveContains(replacing) }) else { return nil }
+            fix.key = field.key
+        }
+        guard let key = fix.key else {
+            return ChatReply(text: "Что исправить? Например: «фамилия Трошкина» или «дата рождения 12.05.1985».", cards: [], isConfident: true)
+        }
+        let current = fields.first { $0.key == key }?.value
+        steps(.open, "Открываю: \(document.type.title) — поле «\(FieldKey.title(key))»")
+        let shown = current.map { FieldKey.isSensitive(key) ? FieldMask.masked($0) : $0 }
+        guard let value = fix.resolvedValue(current: current) else {
+            pendingFix = (documentID, key, fix.namePart)
+            let part = fix.namePart?.title ?? FieldKey.title(key)
+            return ChatReply(text: "Как правильно? Напишите \(part.lowercased()) — покажу, что изменится." + (shown.map { " Сейчас: «\($0)»." } ?? ""),
+                             cards: [.document(documentID: documentID)], isConfident: true)
+        }
+        guard value != current else {
+            return ChatReply(text: "Так и записано: «\(shown ?? value)».", cards: [], isConfident: true)
+        }
+        return ChatReply(text: "Проверьте и нажмите «Исправить». Поле станет ручным — повторное распознавание его не перезапишет:",
+                         cards: [.fieldFix(documentID: documentID, key: key, value: value)], isConfident: true)
+    }
+
+    /// Чей документ поправить: названный в просьбе («в паспорте Ольги»); из
+    /// прошлого ответа — с этим полем; иначе удостоверение, добавленное за
+    /// последние полчаса; иначе единственное
+    private func fixTarget(_ fix: ChatFieldFix, text: String, context: [Int64]) async -> Int64? {
+        // Слова нового значения — не имя: «правильно Трошкина»
+        let valueWords = Set(SearchText.tokens(in: (fix.value ?? "") + " " + (fix.replacing ?? "")).map(\.word))
+        let words = ChatIntent(text).nameWords.filter { $0.count >= 3 && !valueWords.contains($0) }
+        if !words.isEmpty {
+            let personal = await search.documents(ofTypes: ChatRouter.personalPriority.filter(\.isPersonal))
+            let fields = await search.fields(for: personal.map(\.id))
+            let named = personal.filter { document in
+                let owner = fields[document.id]?.first { $0.key == FieldKey.fullName }?.value ?? ""
+                return words.contains { ChatRouter.nameMatches([$0], owner: owner) }
+            }
+            let ranked = named.sorted { (ChatRouter.personalPriority.firstIndex(of: $0.type) ?? .max) < (ChatRouter.personalPriority.firstIndex(of: $1.type) ?? .max) }
+            if let key = fix.key, let holder = ranked.first(where: { document in fields[document.id]?.contains { $0.key == key } == true }) {
+                return holder.id
+            }
+            if let first = ranked.first { return first.id }
+        }
+        if !context.isEmpty {
+            let fields = await search.fields(for: context)
+            if let key = fix.key, let id = context.first(where: { id in fields[id]?.contains { $0.key == key } == true }) { return id }
+            if let replacing = fix.replacing,
+               let id = context.first(where: { id in fields[id]?.contains { $0.value.localizedCaseInsensitiveContains(replacing) } == true }) {
+                return id
+            }
+            let documents = await search.documents(ids: context)
+            if let personal = context.first(where: { id in documents.contains { $0.id == id && $0.type.isPersonal } }) { return personal }
+        }
+        let personal = await search.documents(ofTypes: DocumentType.allCases.filter(\.isPersonal))
+        let dated = personal.compactMap { document in search.file(for: document).map { (document.id, $0.file.addedAt) } }
+        if let newest = dated.max(by: { $0.1 < $1.1 }), Date().timeIntervalSince(newest.1) < 30 * 60 { return newest.0 }
+        return personal.count == 1 ? personal[0].id : nil
     }
 
     // MARK: - Вопрос о вложении
@@ -961,41 +1059,89 @@ final class ChatSession {
         }
     }
 
-    // MARK: - Модель или правила
+    // MARK: - Агент на iPhone или правила
 
-    /// Ответ модели, если она есть и успела, иначе — правила. Чат с моделью
-    /// не должен отвечать хуже, чем без неё: если правила узнали личный
-    /// документ, а модель увела в поиск или в разговор, верят правилам
-    /// `rules` — ответ правил, если его уже получили: точный ответ сюда не
-    /// доходит, а неточный модель может улучшить
+    /// Ответ правил: точный сюда не доходит — его показали раньше. `rules` —
+    /// ответ правил, если его уже получили
     private func answer(
         _ text: String,
         documentID: Int64?,
         context: [Int64],
-        history: [ChatTurn],
-        model: (any ChatPlanning)?,
         rules: (ChatReply, [Int64: SearchResult])? = nil,
         steps: ChatStepSink? = nil
-    ) async -> (ChatReply, [Int64: SearchResult], ChatPlan) {
+    ) async -> (ChatReply, [Int64: SearchResult]) {
         var router = ChatRouter(search: search)
         router.onStep = steps
         router.facts = facts
-        // Адрес модель не планирует: его страницу ищут правила
-        if let model, !ChatIntent(text).wantsAddress {
-            // Пока человек спрашивает, фоновое чтение документов не вытесняет
-            // модель чата из памяти
-            await ModelResidency.shared.noteChatActivity()
-            steps?(.think, "Модель на iPhone разбирает вопрос")
-            let inventory = ChatInventory(documents: await search.documents(ofTypes: DocumentType.allCases))
-            if let plan = await Self.plan(with: model, question: text, history: history, inventory: inventory, timeout: plannerTimeout),
-               Self.accepts(plan, rules: ChatIntent(text)) {
-                let (reply, hits) = await router.reply(plan: plan, text: text)
-                return (reply, hits, plan)
+        if let rules { return rules }
+        return await router.reply(to: text, preferring: documentID, context: context)
+    }
+
+    /// Агент на iPhone — когда облака нет, а модель скачана: сам ищет,
+    /// открывает документы, предлагает перенос и карточки — теми же
+    /// инструментами, что облако. true — ответ готов; false — не успел или
+    /// сбился, и отвечают правила
+    private func answerWithLocalAgent(_ text: String, model: any LocalAgentModel, pending: UUID, steps: @escaping ChatStepSink) async -> Bool {
+        // Пока человек спрашивает, фоновое чтение документов не вытесняет
+        // модель чата из памяти
+        await ModelResidency.shared.noteChatActivity()
+        steps(.think, "Модель на iPhone думает")
+        let engine = LocalAgentEngine(model: model, search: search, proposals: proposals, facts: facts)
+        let history = agentHistory()
+        let owner = search.owner.owner?.name
+        let shown = ShownCards()
+        do {
+            let reply = try await withThrowingTaskGroup(of: CloudChatReply.self) { group in
+                group.addTask { @MainActor in
+                    try await engine.respond(to: text, history: history, owner: owner) { [weak self] event in
+                        guard let self else { return }
+                        switch event {
+                        case .step(let kind, let label): steps(kind, label)
+                        case .cards(let cards):
+                            shown.raw += cards
+                            let snapshot = shown.raw
+                            Task { @MainActor in
+                                let resolved = await ChatCardResolver(search: self.search, facts: self.facts).resolve(snapshot)
+                                guard shown.raw == snapshot, let index = self.messages.firstIndex(where: { $0.id == pending }),
+                                      self.messages[index].isPending else { return }
+                                self.messages[index].cards = resolved
+                            }
+                        default: break
+                        }
+                    }
+                }
+                group.addTask {
+                    try await Task.sleep(for: self.agentTimeout)
+                    throw CloudChatTimeout(seconds: Int(self.agentTimeout.components.seconds))
+                }
+                defer { group.cancelAll() }
+                guard let reply = try await group.next() else { throw CancellationError() }
+                return reply
             }
-            steps?(.think, "Модель не успела — отвечаю по базе")
+            let cards = await ChatCardResolver(search: search, facts: facts).resolve(reply.cards)
+            guard let index = messages.firstIndex(where: { $0.id == pending }) else { return true }
+            messages[index].text = reply.text
+            messages[index].cards = cards
+            messages[index].isPending = false
+            return true
+        } catch {
+            steps(.think, error is CloudChatTimeout ? "Модель не успела — отвечаю по базе" : "Модель сбилась — отвечаю по базе")
+            if let index = messages.firstIndex(where: { $0.id == pending }) { messages[index].cards = [] }
+            return false
         }
-        let (reply, hits) = if let rules { rules } else { await router.reply(to: text, preferring: documentID, context: context) }
-        return (reply, hits, ChatPlan(rulesFor: text))
+    }
+
+    /// Прошлые реплики для агента: вопрос и что показал ответ. Значений полей
+    /// здесь нет — только id документов, их модель откроет сама
+    private func agentHistory() -> [AgentMessage] {
+        var history: [AgentMessage] = []
+        for (question, answer) in zip(messages, messages.dropFirst())
+        where question.role == .user && answer.role == .assistant && !answer.isPending && !question.text.isEmpty {
+            history.append(AgentMessage(role: .user, content: question.text))
+            let shown = Self.summary(of: answer.cards.map(\.card))
+            history.append(AgentMessage(role: .assistant, content: [answer.text, shown].filter { !$0.isEmpty }.joined(separator: " ")))
+        }
+        return Array(history.suffix(6))
     }
 
     /// Документы прошлого ответа: к ним относятся уточнения «а адрес?»,
@@ -1004,48 +1150,6 @@ final class ChatSession {
         guard let last = messages.last(where: { $0.role == .assistant && !$0.isPending }) else { return [] }
         var seen = Set<Int64>()
         return last.cards.flatMap(\.card.documentIDs).filter { seen.insert($0).inserted }
-    }
-
-    /// Правила узнали личный документ — план модели годится, только если
-    /// он тоже о документе
-    static func accepts(_ plan: ChatPlan, rules: ChatIntent) -> Bool {
-        let rulesFoundDocument = rules.types.contains(where: \.isPersonal)
-        guard rulesFoundDocument else { return true }
-        return plan.action == .document || plan.action == .list
-    }
-
-    /// Гонка модели и таймера. Проигравший не задерживает ответ: долгая первая
-    /// загрузка модели доработает в фоне и пригодится к следующему вопросу
-    static func plan(
-        with model: any ChatPlanning,
-        question: String,
-        history: [ChatTurn],
-        inventory: ChatInventory,
-        timeout: Duration
-    ) async -> ChatPlan? {
-        await withCheckedContinuation { continuation in
-            let once = ResumeOnce(continuation)
-            let work = Task {
-                once.resume(try? await model.plan(question: question, history: history, inventory: inventory))
-            }
-            Task {
-                try? await Task.sleep(for: timeout)
-                work.cancel()
-                once.resume(nil)
-            }
-        }
-    }
-
-    /// Прошлые вопросы и планы ответов на них — для уточнений вроде «а загран?».
-    /// Ни карточек, ни значений полей модель не видит
-    private func turns() -> [ChatTurn] {
-        var turns: [ChatTurn] = []
-        for (question, answer) in zip(messages, messages.dropFirst())
-        where question.role == .user && answer.role == .assistant && !answer.isPending {
-            guard let plan = answer.plan else { continue }
-            turns.append(ChatTurn(question: question.text, plan: plan))
-        }
-        return Array(turns.suffix(ChatModelPrompt.maxTurns))
     }
 
     /// Поле исправили или подтвердили — карточки с этим документом перечитываются
@@ -1059,24 +1163,6 @@ final class ChatSession {
                 messages[messageIndex].cards[cardIndex].content = fresh.content
             }
         }
-    }
-}
-
-/// Продолжение, которое возобновляется ровно один раз — кто первый
-private final class ResumeOnce<Value: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Value, Never>?
-
-    init(_ continuation: CheckedContinuation<Value, Never>) {
-        self.continuation = continuation
-    }
-
-    func resume(_ value: Value) {
-        lock.lock()
-        let pending = continuation
-        continuation = nil
-        lock.unlock()
-        pending?.resume(returning: value)
     }
 }
 

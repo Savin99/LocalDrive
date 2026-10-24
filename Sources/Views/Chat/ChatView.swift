@@ -416,6 +416,10 @@ struct ChatView: View {
                 await search.verifyField(documentID: document.id, key: field.key)
                 await session.refresh(documentID: document.id)
             },
+            fixField: { document, key, value in
+                await search.setManualField(documentID: document.id, key: key, value: value)
+                await session.refresh(documentID: document.id)
+            },
             remind: { document, validity in await remind(document, validity) }
         )
     }
