@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct LocalDriveApp: App {
     @State private var store: VaultStore
+    @State private var facts: FactStore
     /// Подтверждение владельца перед показом номера в чате
     @State private var lock = LockManager()
     @State private var hiddenFolders = HiddenFolders()
@@ -16,6 +17,7 @@ struct LocalDriveApp: App {
         let store = VaultStore()
         let search = SearchService(store: store)
         _store = State(initialValue: store)
+        _facts = State(initialValue: FactStore(rootURL: store.rootURL))
         _backup = State(initialValue: BackupManager(vaultURL: store.rootURL))
         _search = State(initialValue: search)
         // Переписка живёт, пока работает приложение: уход в фон её не стирает.
@@ -31,6 +33,7 @@ struct LocalDriveApp: App {
         WindowGroup {
             RootView()
                 .environment(store)
+                .environment(facts)
                 .environment(lock)
                 .environment(hiddenFolders)
                 .environment(backup)

@@ -169,6 +169,8 @@ final class BackupManager {
             let restoredSummary = try await withBackupRoot(mode: .reading) { [engine, vaultURL] root in
                 try engine.restore(summary, backupRootURL: root, vaultURL: vaultURL, keyData: keyData)
             }
+            // Хранилище на диске уже другое: карточки фактов перечитываются сами
+            NotificationCenter.default.post(name: .vaultDidRestore, object: nil)
             try RecoveryKeyStore.saveRestoredKey(keyData)
             hasRecoveryKey = true
             // Автокопии включаем только если есть куда писать: восстановление
