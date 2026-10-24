@@ -30,7 +30,7 @@ struct FolderCard: View {
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(folder.name)
-                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                        .font(.system(.subheadline, weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Text(subtitle)
@@ -44,7 +44,7 @@ struct FolderCard: View {
         }
         .background(Theme.card)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .shadow(color: .black.opacity(0.07), radius: 12, y: 4)
+        .cardBorder(cornerRadius: 20)
     }
 
     private var emptyCover: some View {
@@ -63,6 +63,10 @@ struct FolderCard: View {
     private var subtitle: String {
         guard stats.count > 0 else { return "Пусто" }
         let size = ByteCountFormatter.string(fromByteCount: stats.size, countStyle: .file)
+        if folder.kind == .feed {
+            let blocks = pluralize(stats.count, "блок", "блока", "блоков")
+            return stats.size > 0 ? "\(blocks) · \(size)" : blocks
+        }
         return "\(pluralize(stats.count, "файл", "файла", "файлов")) · \(size)"
     }
 }

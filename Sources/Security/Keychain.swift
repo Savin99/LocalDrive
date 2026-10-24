@@ -4,13 +4,17 @@ import Security
 // Минимальная обёртка над Keychain для хранения PIN-кода
 enum Keychain {
     @discardableResult
-    static func set(_ data: Data, service: String) -> OSStatus {
+    static func set(
+        _ data: Data,
+        service: String,
+        accessible: CFString = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    ) -> OSStatus {
         delete(service: service)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrAccessible as String: accessible,
         ]
         return SecItemAdd(query as CFDictionary, nil)
     }

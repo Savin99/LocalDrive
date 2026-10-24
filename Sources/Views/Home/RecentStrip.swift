@@ -8,7 +8,7 @@ struct RecentStrip: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Недавнее")
-                .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                .font(.system(.subheadline, weight: .semibold))
                 .padding(.horizontal, 20)
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -72,6 +72,6 @@ struct RecentStrip: View {
         .frame(width: side)
         .background(Theme.card)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
+        .cardBorder(cornerRadius: 16)
     }
 }

@@ -20,11 +20,23 @@ extension UIColor {
     }
 }
 
-// Дизайн-система: светлый минимализм днём, глубокий тёмный вечером
+// Дизайн-система в духе приложения ChatGPT (выбор владельца от 12.10.2026):
+// белый и почти чёрный, серые поверхности и тонкие рамки, зелёный акцент —
+// скупо, на главных действиях. Цвета папок остаются: это их опознавательный знак
 enum Theme {
-    static let background = Color(light: 0xF7F6F3, dark: 0x0E0E12)
-    static let card = Color(light: 0xFFFFFF, dark: 0x1B1B21)
-    static let accent = Color(light: 0x4F6BF0, dark: 0x7288F7)
+    static let background = Color(light: 0xFFFFFF, dark: 0x212121)
+    static let card = Color(light: 0xFFFFFF, dark: 0x2A2A2A)
+    /// Зелёный OpenAI — переключатели, выбранное, главное действие меню
+    static let accent = Color(light: 0x10A37F, dark: 0x19C37D)
+
+    /// Текст и главные кнопки: почти чёрный днём, почти белый вечером
+    static let ink = Color(light: 0x0D0D0D, dark: 0xECECEC)
+    /// Серая поверхность: пузырь вопроса, поле ввода, чипы
+    static let surface = Color(light: 0xF4F4F4, dark: 0x303030)
+    /// Рамка карточек и полей
+    static let border = Color(light: 0xE5E5E5, dark: 0x3A3A3A)
+    /// Фон бокового меню
+    static let sidebar = Color(light: 0xF9F9F9, dark: 0x171717)
 
     /// Обводка миниатюр и разделители — в тёмной теме светлая, а не чёрная
     static let hairline = Color(light: 0x000000, dark: 0xFFFFFF).opacity(0.09)
@@ -67,10 +79,39 @@ enum Theme {
 }
 
 extension View {
-    // Единый стиль карточки
+    // Единый стиль карточки: плоская подложка и тонкая рамка, как у карточек
+    // ChatGPT. Тень — едва заметная: на белом фоне карточку держит рамка
     func cardStyle(cornerRadius: CGFloat = 20) -> some View {
         background(Theme.card, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .shadow(color: .black.opacity(0.07), radius: 12, y: 4)
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Theme.border, lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+    }
+
+    /// Рамка и лёгкая тень для карточек, которые сами обрезают содержимое
+    /// по скруглению — превью у них доходит до края
+    func cardBorder(cornerRadius: CGFloat) -> some View {
+        overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(Theme.border, lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+    }
+
+    /// Главная кнопка: заливка цветом текста, надпись — цветом фона.
+    /// В светлой теме чёрная кнопка с белым текстом, в тёмной — наоборот
+    func primaryCapsule() -> some View {
+        foregroundStyle(Theme.background)
+            .background(Theme.ink, in: Capsule())
+    }
+
+    /// Второстепенная кнопка: прозрачная капсула с тонкой рамкой
+    func secondaryCapsule() -> some View {
+        foregroundStyle(Theme.ink)
+            .background(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+            .contentShape(Capsule())
     }
 }
 

@@ -17,7 +17,7 @@ struct LockView: View {
                 LockMark()
 
                 Text("LocalDrive")
-                    .font(.system(.title2, design: .rounded, weight: .semibold))
+                    .font(.system(.title2, weight: .semibold))
                     .padding(.top, 20)
 
                 Text("Введите код")

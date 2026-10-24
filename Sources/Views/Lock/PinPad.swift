@@ -9,7 +9,7 @@ struct PinDots: View {
         HStack(spacing: 18) {
             ForEach(0..<total, id: \.self) { i in
                 Circle()
-                    .fill(i < filled ? Theme.accent : Color.black.opacity(0.12))
+                    .fill(i < filled ? Theme.ink : Theme.border)
                     .frame(width: 14, height: 14)
                     .animation(.snappy(duration: 0.15), value: filled)
             }
@@ -53,11 +53,11 @@ struct PinPad: View {
             action()
         } label: {
             Text(label)
-                .font(.system(size: 28, weight: .medium, design: .rounded))
-                .foregroundStyle(.primary)
+                .font(.system(size: 28, weight: .medium))
+                .foregroundStyle(Theme.ink)
                 .frame(width: 72, height: 72)
-                .background(Theme.card, in: Circle())
-                .shadow(color: .black.opacity(0.05), radius: 8, y: 3)
+                // Серые круглые клавиши без тени — как кнопки ChatGPT
+                .background(Theme.surface, in: Circle())
         }
         .buttonStyle(.plain)
     }
@@ -66,7 +66,7 @@ struct PinPad: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 24, weight: .medium))
-                .foregroundStyle(Theme.accent)
+                .foregroundStyle(Theme.ink)
                 .frame(width: 72, height: 72)
                 .contentShape(Circle())
         }

@@ -5,6 +5,7 @@ struct FileGridCell: View {
     let file: VaultFile
     let accent: Color
     let side: CGFloat
+    var showsContentDate = false
 
     private var isVideo: Bool {
         file.type.conforms(to: .movie) || file.type.conforms(to: .video)
@@ -40,7 +41,7 @@ struct FileGridCell: View {
                     .font(.system(size: 12, weight: .medium))
                     .lineLimit(2, reservesSpace: true)
                     .multilineTextAlignment(.leading)
-                Text(file.sizeText)
+                Text(RussianFormat.size(file.size))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -50,7 +51,7 @@ struct FileGridCell: View {
         }
         .background(Theme.card)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: .black.opacity(0.06), radius: 10, y: 3)
+        .cardBorder(cornerRadius: 18)
         .contentShape(Rectangle())
     }
 }
@@ -61,7 +62,7 @@ struct TypeBadge: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .font(.system(size: 9, weight: .bold))
             .foregroundStyle(.white)
             .padding(.horizontal, 6)
             .padding(.vertical, 3)

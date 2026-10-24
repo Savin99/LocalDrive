@@ -4,7 +4,7 @@ struct EmptyStateView: View {
     let icon: String
     let title: String
     let subtitle: String
-    var accent: Color = Theme.accent
+    var accent: Color = Theme.ink
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
 
@@ -41,7 +41,8 @@ struct EmptyStateView: View {
             .padding(.bottom, 6)
 
             Text(title)
-                .font(.system(.title3, design: .rounded, weight: .semibold))
+                .font(.system(.title3, weight: .semibold))
+                .foregroundStyle(Theme.ink)
 
             Text(subtitle)
                 .font(.subheadline)
@@ -50,14 +51,14 @@ struct EmptyStateView: View {
                 .padding(.horizontal, 44)
 
             if let actionTitle, let action {
+                // Главное действие — чёрная капсула, как кнопки ChatGPT,
+                // независимо от цвета папки вокруг
                 Button(action: action) {
                     Text(actionTitle)
-                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .font(.system(.subheadline, weight: .semibold))
                         .padding(.horizontal, 22)
                         .padding(.vertical, 12)
-                        .background(accent, in: Capsule())
-                        .shadow(color: accent.opacity(0.35), radius: 10, y: 4)
+                        .primaryCapsule()
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 8)

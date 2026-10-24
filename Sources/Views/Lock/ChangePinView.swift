@@ -36,7 +36,7 @@ struct ChangePinView: View {
                     Spacer()
 
                     Text(stage.title)
-                        .font(.system(.title2, design: .rounded, weight: .semibold))
+                        .font(.system(.title2, weight: .semibold))
 
                     Text(hint ?? " ")
                         .font(.subheadline)

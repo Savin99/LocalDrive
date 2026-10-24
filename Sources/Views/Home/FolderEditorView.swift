@@ -1,6 +1,6 @@
 import SwiftUI
 
-// Создание и редактирование папки: имя, иконка, цвет
+// Создание и редактирование папки: тип, видимость, имя, иконка, цвет
 struct FolderEditorView: View {
     @Environment(VaultStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -10,12 +10,18 @@ struct FolderEditorView: View {
     @State private var name: String
     @State private var icon: String
     @State private var color: String
+    @State private var kind: VaultFolderKind
+    @State private var isSuperHidden: Bool
+    @State private var searchable: Bool
 
     init(folder: VaultFolder?) {
         self.folder = folder
         _name = State(initialValue: folder?.name ?? "")
         _icon = State(initialValue: folder?.icon ?? "folder.fill")
         _color = State(initialValue: folder?.color ?? "indigo")
+        _kind = State(initialValue: folder?.kind ?? .files)
+        _isSuperHidden = State(initialValue: folder?.isSuperHidden ?? false)
+        _searchable = State(initialValue: folder?.searchable ?? true)
     }
 
     private var trimmedName: String {
@@ -32,6 +38,12 @@ struct FolderEditorView: View {
                 ScrollView {
                     VStack(spacing: 24) {
                         preview
+
+                        if folder == nil {
+                            folderKindPicker
+                        }
+
+                        visibilityPicker
 
                         VStack(alignment: .leading, spacing: 8) {
                             Text("НАЗВАНИЕ")
@@ -95,6 +107,10 @@ struct FolderEditorView: View {
                             .padding(14)
                             .cardStyle(cornerRadius: 14)
                         }
+
+                        // В конце формы, а не над названием: выше поле названия
+                        // уезжало бы под клавиатуру, и форма прокручивалась при вводе
+                        searchPicker
                     }
                     .padding(20)
                 }
@@ -125,19 +141,124 @@ struct FolderEditorView: View {
                     .foregroundStyle(Theme.color(color))
             }
             Text(trimmedName.isEmpty ? "Без названия" : trimmedName)
-                .font(.system(.headline, design: .rounded))
+                .font(.system(.headline))
                 .foregroundStyle(trimmedName.isEmpty ? .secondary : .primary)
+            Text(kind.subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if isSuperHidden {
+                Label("Суперскрытая", systemImage: "eye.slash.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.color(color))
+            }
         }
         .animation(.snappy(duration: 0.2), value: icon)
         .animation(.snappy(duration: 0.2), value: color)
     }
 
+    private var visibilityPicker: some View {
+        Toggle(isOn: $isSuperHidden) {
+            VStack(alignment: .leading, spacing: 3) {
+                Label("Суперскрытая папка", systemImage: "eye.slash.fill")
+                    .font(.system(.subheadline, weight: .semibold))
+                Text("Не показывать на главном экране и в недавних до секретного жеста")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .tint(Theme.color(color))
+        .padding(14)
+        .cardStyle(cornerRadius: 14)
+    }
+
+    /// У суперскрытой папки переключатель выключен и не включается: то, чего
+    /// нет в индексе, поиск найти не может
+    private var searchPicker: some View {
+        Toggle(isOn: Binding(
+            get: { searchable && !isSuperHidden },
+            set: { searchable = $0 }
+        )) {
+            VStack(alignment: .leading, spacing: 3) {
+                Label("Доступна для поиска", systemImage: "text.magnifyingglass")
+                    .font(.system(.subheadline, weight: .semibold))
+                Text(isSuperHidden
+                    ? "Суперскрытые папки не распознаются и не ищутся"
+                    : "Текст документов распознаётся на iPhone и находится в поиске")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .tint(Theme.color(color))
+        .disabled(isSuperHidden)
+        .padding(14)
+        .cardStyle(cornerRadius: 14)
+        .accessibilityIdentifier("folderSearchable")
+    }
+
+    private var folderKindPicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("ФОРМАТ")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                ForEach(VaultFolderKind.allCases, id: \.rawValue) { item in
+                    Button {
+                        withAnimation(.snappy(duration: 0.2)) {
+                            kind = item
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Image(systemName: item.icon)
+                                .font(.system(size: 21, weight: .semibold))
+                                .foregroundStyle(kind == item ? .white : Theme.color(color))
+                            Text(item.title)
+                                .font(.system(.subheadline, weight: .semibold))
+                                .foregroundStyle(kind == item ? .white : .primary)
+                            Text(item.subtitle)
+                                .font(.caption2)
+                                .foregroundStyle(kind == item ? .white.opacity(0.8) : .secondary)
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(2)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 108, alignment: .leading)
+                        .padding(14)
+                        .background(
+                            kind == item ? Theme.color(color) : Theme.card,
+                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(kind == item ? .clear : Theme.hairline, lineWidth: 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("folderKind-\(item.rawValue)")
+                }
+            }
+        }
+    }
+
     private func save() {
         guard !trimmedName.isEmpty else { return }
         if let folder {
-            store.updateFolder(id: folder.id, name: trimmedName, icon: icon, color: color)
+            store.updateFolder(
+                id: folder.id,
+                name: trimmedName,
+                icon: icon,
+                color: color,
+                isSuperHidden: isSuperHidden,
+                searchable: searchable
+            )
         } else {
-            store.createFolder(name: trimmedName, icon: icon, color: color)
+            store.createFolder(
+                name: trimmedName,
+                icon: icon,
+                color: color,
+                kind: kind,
+                isSuperHidden: isSuperHidden,
+                searchable: searchable
+            )
         }
         dismiss()
     }

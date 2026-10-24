@@ -28,6 +28,9 @@ struct FileThumbnail: View {
     var cornerRadius: CGFloat = 14
     /// В коллаже обводка не нужна — ячейки и без неё разделены зазором
     var showsBorder: Bool = true
+    /// Занять предложенное место вместо фиксированного `size`: в ряду ленты
+    /// размеры ячеек считает раскладка, а `size` нужен только для запроса превью
+    var fills: Bool = false
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: UIImage?
@@ -65,7 +68,11 @@ struct FileThumbnail: View {
                 }
             }
         }
-        .frame(width: size.width, height: size.height)
+        .frame(
+            maxWidth: fills ? .infinity : size.width,
+            maxHeight: fills ? .infinity : size.height
+        )
+        .frame(width: fills ? nil : size.width, height: fills ? nil : size.height)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
             // Тонкая обводка: без неё светлые превью (страница текста) сливаются с фоном

@@ -72,6 +72,21 @@ final class LockManager {
         }
     }
 
+    /// Подтверждение владельца перед показом номера документа: Face ID, а без
+    /// него — код iPhone. Если на телефоне нет ни того, ни другого, защищать
+    /// номер нечем: приложение уже открыто по своему коду
+    @MainActor
+    func confirmOwner(reason: String) async -> Bool {
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else { return true }
+        do {
+            return try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
+        } catch {
+            return false
+        }
+    }
+
     func lock() { isLocked = true }
     func unlock() { isLocked = false }
 

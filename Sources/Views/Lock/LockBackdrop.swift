@@ -1,6 +1,7 @@
 import SwiftUI
 
-// Живой фон экрана входа: два цветных пятна медленно расходятся и сходятся
+// Живой фон экрана входа: два серых пятна медленно расходятся и сходятся.
+// Цвета нет намеренно — оформление монохромное, как у ChatGPT
 struct LockBackdrop: View {
     @State private var drift = false
 
@@ -11,7 +12,7 @@ struct LockBackdrop: View {
             Circle()
                 .fill(
                     RadialGradient(
-                        colors: [Theme.accent.opacity(0.30), .clear],
+                        colors: [Theme.ink.opacity(0.10), .clear],
                         center: .center,
                         startRadius: 0,
                         endRadius: 260
@@ -23,7 +24,7 @@ struct LockBackdrop: View {
             Circle()
                 .fill(
                     RadialGradient(
-                        colors: [Theme.color("purple").opacity(0.22), .clear],
+                        colors: [Theme.ink.opacity(0.06), .clear],
                         center: .center,
                         startRadius: 0,
                         endRadius: 240
@@ -43,19 +44,13 @@ struct LockMark: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Theme.accent, Theme.color("purple")],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+                .fill(Theme.ink)
                 .frame(width: 84, height: 84)
-                .shadow(color: Theme.accent.opacity(0.35), radius: 18, y: 8)
+                .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
 
             Image(systemName: "lock.fill")
                 .font(.system(size: 36, weight: .medium))
-                .foregroundStyle(.white)
+                .foregroundStyle(Theme.background)
         }
     }
 }

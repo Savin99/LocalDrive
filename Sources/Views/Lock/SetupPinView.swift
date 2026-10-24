@@ -3,6 +3,7 @@ import SwiftUI
 // Первый запуск: придумать и подтвердить PIN-код
 struct SetupPinView: View {
     @Environment(LockManager.self) private var lock
+    @Environment(VaultStore.self) private var store
 
     private enum Stage {
         case create
@@ -14,6 +15,7 @@ struct SetupPinView: View {
     @State private var pin = ""
     @State private var attempts = 0
     @State private var showMismatch = false
+    @State private var showsRestore = false
 
     private let pinLength = 4
 
@@ -27,14 +29,28 @@ struct SetupPinView: View {
                 LockMark()
 
                 Text(stage == .create ? "Придумайте код" : "Повторите код")
-                    .font(.system(.title2, design: .rounded, weight: .semibold))
+                    .font(.system(.title2, weight: .semibold))
                     .padding(.top, 20)
                     .contentTransition(.opacity)
 
-                Text(showMismatch ? "Коды не совпадают — попробуйте ещё раз" : "Код защищает доступ к вашим файлам")
+                Text(setupHint)
                     .font(.subheadline)
                     .foregroundStyle(showMismatch ? .red : .secondary)
                     .padding(.top, 4)
+
+                if stage == .create && store.folders.isEmpty {
+                    Button {
+                        showsRestore = true
+                    } label: {
+                        Label("Восстановить файлы", systemImage: "icloud.and.arrow.down")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("restore-files")
+                    .padding(.top, 6)
+                }
 
                 PinDots(filled: pin.count, total: pinLength)
                     .padding(.top, 28)
@@ -50,6 +66,15 @@ struct SetupPinView: View {
             }
         }
         .animation(.smooth(duration: 0.25), value: stage)
+        .fullScreenCover(isPresented: $showsRestore) {
+            RestoreBackupView()
+        }
+    }
+
+    private var setupHint: String {
+        if showMismatch { return "Коды не совпадают — попробуйте ещё раз" }
+        if !store.folders.isEmpty { return "Файлы восстановлены — придумайте новый код" }
+        return "Код защищает доступ к вашим файлам"
     }
 
     private func append(digit: String) {

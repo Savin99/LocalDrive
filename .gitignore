@@ -30,3 +30,4 @@ __pycache__/
 
 # Локальный Team ID для подписи
 Support/Signing.local.xcconfig
+.env.local
