@@ -163,6 +163,83 @@ final class ChatPersonTests: XCTestCase {
         XCTAssertTrue(steps.contains(.open), "не видно, какой документ открыл: \(steps)")
     }
 
+    // MARK: - «Какой день рождения у этого человека?» (24.10.2026, сборка 16)
+
+    /// Владелец на сборке 16: загрузил паспорт, спросил «какой день рождения у
+    /// этого человека» — чат не ответил. «День» и «этого человека» считались
+    /// словами имени, и вопрос уходил в поиск по тексту
+    func testBirthdayWithDayWordIsBirthDate() async throws {
+        _ = try await indexPassports()
+        let anna = try await passport(of: "Иванова Анна Сергеевна")
+        XCTAssertEqual(ChatIntent("какой день рождения у Анны").nameWords, ["анны"])
+        let answer = await reply("какой день рождения у Анны")
+        XCTAssertEqual(answer.cards, [.fields(documentID: anna.id, keys: [FieldKey.birthDate])])
+    }
+
+    func testThisPersonMeansDocumentOfPreviousAnswer() async throws {
+        _ = try await indexPassports()
+        let anna = try await passport(of: "Иванова Анна Сергеевна")
+        XCTAssertEqual(ChatIntent("какой день рождения у этого человека?").nameWords, [], "«этого человека» — не имя")
+        let answer = await ChatRouter(search: search).reply(to: "какой день рождения у этого человека?", context: [anna.id]).0
+        XCTAssertEqual(answer.cards, [.fields(documentID: anna.id, keys: [FieldKey.birthDate])])
+        let her = await ChatRouter(search: search).reply(to: "когда у неё день рождения", context: [anna.id]).0
+        XCTAssertEqual(her.cards, [.fields(documentID: anna.id, keys: [FieldKey.birthDate])])
+    }
+
+    /// Без прошлого ответа «этот человек» — паспорт, который только что добавили
+    func testThisPersonWithoutContextIsJustAddedPassport() async throws {
+        let folder = try makeFolder("Паспорта")
+        store.importData(Data(Self.savinRussian.utf8), preferredName: "савин.txt", to: folder)
+        search.reconcile()
+        await search.waitUntilIdle()
+        try await Task.sleep(for: .seconds(1.1))
+        store.importData(Data(Self.ivanovaRussian.utf8), preferredName: "иванова.txt", to: folder)
+        search.reconcile()
+        await search.waitUntilIdle()
+        let anna = try await passport(of: "Иванова Анна Сергеевна")
+
+        let answer = await reply("какой день рождения у этого человека?")
+        XCTAssertEqual(answer.cards, [.fields(documentID: anna.id, keys: [FieldKey.birthDate])])
+        XCTAssertTrue(answer.isConfident)
+    }
+
+    /// Паспорт брошен в чат и ещё не разложен: в базе его нет, но разбор
+    /// вложения уже знает поля — дата рождения из него
+    func testBirthdayOfPassportAttachedToChat() async throws {
+        _ = try makeFolder("Паспорта")
+        let inbox = ChatAttachmentInbox(directory: root.appendingPathComponent("Inbox", isDirectory: true))
+        let session = ChatSession(search: search, inbox: inbox)
+        session.useFiles(store)
+        _ = await inbox.add(data: Data(Self.ivanovaRussian.utf8), named: "скан.txt")
+
+        session.send("", attaching: inbox.takeDraft())
+        try await waitForAnswer(session)
+        let placed = try XCTUnwrap(session.messages.last)
+        XCTAssertTrue(placed.text.contains("Иванова А. С.") || placed.cards.contains { card in
+            if case .proposal(let proposal) = card.content { proposal.summary.contains("Иванова А. С.") } else { false }
+        }, "в ответе на вложение не видно, чей это паспорт")
+
+        session.send("какой день рождения у этого человека?")
+        try await waitForAnswer(session)
+        let answer = try XCTUnwrap(session.messages.last)
+        XCTAssertTrue(answer.text.contains("12.05.1985"), answer.text)
+    }
+
+    /// Паспорт и вопрос одним сообщением — без облака: ответ и где хранить
+    func testQuestionSentTogetherWithPassport() async throws {
+        _ = try makeFolder("Паспорта")
+        let inbox = ChatAttachmentInbox(directory: root.appendingPathComponent("Inbox", isDirectory: true))
+        let session = ChatSession(search: search, inbox: inbox)
+        session.useFiles(store)
+        _ = await inbox.add(data: Data(Self.ivanovaRussian.utf8), named: "скан.txt")
+
+        session.send("какой у него день рождения?", attaching: inbox.takeDraft())
+        try await waitForAnswer(session)
+        let answer = try XCTUnwrap(session.messages.last)
+        XCTAssertTrue(answer.text.contains("12.05.1985"), answer.text)
+        XCTAssertTrue(answer.cards.contains { if case .proposal = $0.content { true } else { false } }, "пропало предложение, куда положить")
+    }
+
     // MARK: - «Положи в …»
 
     func testFileCommandParsing() throws {

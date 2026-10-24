@@ -196,6 +196,10 @@ final class ChatSession {
     @ObservationIgnored private var store: VaultStore?
     /// «Карточки»: факты, которых нет в документах, — «дом Камилы»
     @ObservationIgnored private(set) var facts: FactStore?
+    /// Что разбор прочитал во вложениях: вид и поля. По ним чат отвечает на
+    /// «какой день рождения у этого человека», пока файл не разложен по папкам
+    /// и в базе его нет. Только в памяти, как и переписка
+    @ObservationIgnored private var attachmentReadings: [String: FilePlacementAdvisor.Reading] = [:]
     /// Что умеет экран для действий интерфейса: открыть файл, скопировать,
     /// напомнить, подтвердить. Даёт ChatView
     @ObservationIgnored private var genuiHooks: GenUIChatHooks?
@@ -297,6 +301,12 @@ final class ChatSession {
                     reply = ChatReply(text: "Не понял, что запомнить. Напишите, например: «запомни: дом Камилы — домофон 45, этаж 3, адрес Тверская 5».",
                                       cards: [], isConfident: true)
                 }
+                await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
+                return
+            }
+            // «Какой день рождения у этого человека?» сразу после вложения:
+            // файла ещё нет в базе, но его разбор знает поля
+            if documentID == nil, attachments.isEmpty, let reply = await self.attachmentAnswer(trimmed, steps: steps) {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
@@ -552,6 +562,7 @@ final class ChatSession {
 
     func reset() {
         messages.removeAll()
+        attachmentReadings.removeAll()
         revealsSensitive = false
         cloudEngine?.reset()
         // Временные копии вложений стираются вместе с перепиской
@@ -578,6 +589,13 @@ final class ChatSession {
             let steps = self.stepSink(for: pending.id)
             defer { self.finishSteps(of: pending.id) }
             steps(.files, "Смотрю " + (items.count == 1 ? "вложение «\(items[0].name)»" : pluralize(items.count, "вложение", "вложения", "вложений")))
+            // Вложения читаются сразу и запоминаются: следующий вопрос «а какой
+            // у него день рождения?» — по ним. С облаком — параллельно ответу
+            let reading = Task { @MainActor in
+                for item in items where self.attachmentReadings[item.id] == nil {
+                    self.attachmentReadings[item.id] = await FilePlacementAdvisor.read(item)
+                }
+            }
             // «Положи в Паспорта» вместе с файлом — куда, уже сказано
             if let command = ChatFileCommand(trimmed), let store {
                 let target = command.target(in: store)
@@ -616,7 +634,13 @@ final class ChatSession {
             let reply: ChatReply
             if let store {
                 steps(.search, "Распознаю и ищу подходящую папку")
-                reply = await FilePlacementAdvisor(store: store, search: search).localReply(for: items)
+                await reading.value
+                var placed = await FilePlacementAdvisor(store: store, search: search).localReply(for: items, readings: attachmentReadings)
+                // «Какой у него день рождения?» вместе с файлом — сначала ответ
+                if !trimmed.isEmpty, let answer = await attachmentAnswer(trimmed, steps: steps, footer: false) {
+                    placed.text = answer.text + "\n\n" + placed.text
+                }
+                reply = placed
             } else {
                 reply = ChatReply(text: "Файлы получил, но разложить их сейчас не могу — откройте чат заново.", cards: [])
             }
@@ -628,6 +652,59 @@ final class ChatSession {
             messages[index].thoughts = ""
             messages[index].isPending = false
         }
+    }
+
+    // MARK: - Вопрос о вложении
+
+    /// Ответ по прочитанному во вложениях последнего сообщения с файлами — если
+    /// после него речь не заходила о документах из базы. nil — вопрос не о
+    /// полях или вложений с документом нет
+    /// `footer` — подсказка «положите в папку»: в ответе вместе с предложением
+    /// разложить файл она лишняя
+    private func attachmentAnswer(_ text: String, steps: @escaping ChatStepSink, footer: Bool = true) async -> ChatReply? {
+        let intent = ChatIntent(text)
+        guard intent.nameWords.isEmpty, !intent.fieldKeys.isEmpty || intent.wantsAllFields,
+              intent.types.allSatisfy(\.isPersonal),
+              let sent = messages.lastIndex(where: { $0.role == .user && !$0.attachments.isEmpty }) else { return nil }
+        let laterDocuments = messages[(sent + 1)...].contains { message in
+            message.role == .assistant && message.cards.contains { !$0.card.documentIDs.isEmpty }
+        }
+        guard !laterDocuments else { return nil }
+        let ids = messages[sent].attachments
+        // С облаком вложения ещё могли не дочитаться
+        for id in ids where attachmentReadings[id] == nil {
+            guard let item = inbox.item(id) else { continue }
+            attachmentReadings[id] = await FilePlacementAdvisor.read(item)
+        }
+        let keys = intent.fieldKeys.isEmpty ? FieldKey.order : intent.fieldKeys
+        let readings = ids.compactMap { id in attachmentReadings[id].map { (id: id, analysis: $0.analysis) } }
+        guard let chosen = readings.first(where: { reading in keys.contains { key in reading.analysis.fields.contains { $0.key == key } } })
+            ?? readings.first(where: { $0.analysis.type.isPersonal }) else { return nil }
+        let name = inbox.names[chosen.id] ?? "вложение"
+        steps(.open, "Смотрю вложение «\(name)»")
+        let analysis = chosen.analysis
+        let owner = analysis.fields.first { $0.key == FieldKey.fullName }?.value ?? ""
+        let country = analysis.fields.first { $0.key == FieldKey.country }?.value
+        let head = [analysis.type == .other ? "" : analysis.type.title(country: country), owner.isEmpty ? "" : ChatRouter.shortName(owner)]
+            .filter { !$0.isEmpty }.joined(separator: " — ")
+        let found = keys.compactMap { key in analysis.fields.first { $0.key == key } }
+        let source = "«\(name)»" + (head.isEmpty ? "" : " (\(head))")
+        guard !found.isEmpty else {
+            let asked = keys.map { "«\(FieldKey.title($0))»" }.joined(separator: ", ")
+            let deeper = search.cloud.isEnabled && search.cloud.hasKey ? " — там его прочитает облако" : " — там его прочитают внимательнее"
+            return ChatReply(text: "На вложении \(source) не разобрал \(asked). Положите файл в папку кнопкой «Выполнить» выше\(deeper).",
+                             cards: [], isConfident: true)
+        }
+        // Номер — маской, как в карточке: значения здесь — текст, а не карточка
+        let lines = found.map { field in
+            let value = FieldKey.isSensitive(field.key) ? FieldMask.masked(field.value) : field.value
+            return "\(FieldKey.title(field.key)): \(value)" + (field.needsReview ? " — сверьте с фото" : "")
+        }
+        return ChatReply(
+            text: "По вложению \(source):\n" + lines.joined(separator: "\n")
+                + (footer ? "\n\nЧтобы данные были под рукой всегда, положите файл в папку — «Выполнить» выше." : ""),
+            cards: [], isConfident: true
+        )
     }
 
     // MARK: - Просьбы разложить файлы

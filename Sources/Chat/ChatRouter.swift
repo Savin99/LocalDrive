@@ -78,6 +78,9 @@ struct ChatIntent: Equatable {
     var wantsAllFields = false
     /// «Фото паспорта», «скинь скан», «дошли файл»: нужен сам файл, а не поля
     var wantsFile = false
+    /// «Этого человека», «у него», «её»: о документе, о котором только что шла
+    /// речь, или о том, что только что добавили
+    var refersBack = false
 
     init(_ text: String) {
         let tokens = SearchText.tokens(in: text)
@@ -136,9 +139,11 @@ struct ChatIntent: Equatable {
             _ = take(stems: ["подразделен", "код"])
             fieldKeys.append(FieldKey.departmentCode)
         }
-        if has(stems: ["рожден"], words: ["родился", "родилась"]) {
+        // «День рождения» — тоже дата: «день» иначе остался бы словом имени, и
+        // «какой день рождения у Ольги» уходил в поиск по тексту (сборка 16)
+        if has(stems: ["рожден"], words: ["родился", "родилась", "днюха", "днюху", "др"]) {
             fieldKeys.append(has(stems: ["мест"]) ? FieldKey.birthPlace : FieldKey.birthDate)
-            _ = take(stems: ["рожден", "мест", "дат"], words: ["родился", "родилась"])
+            _ = take(stems: ["рожден", "мест", "дат"], words: ["родился", "родилась", "день", "дня", "днём", "днем", "днюха", "днюху", "др"])
         }
         // «Сколько лет Ольге», «возраст Ильи» — это дата рождения
         if !fieldKeys.contains(FieldKey.birthDate), has(words: ["возраст", "возраста", "возрасте"])
@@ -172,6 +177,7 @@ struct ChatIntent: Equatable {
         wantsFile = take(words: ["фото", "фотку", "фотографию", "фотография", "скан", "сканы", "скриншот", "файл",
                                  "файлом", "картинку", "оригинал", "pdf", "пдф"])
         wantsList = take(words: ["документы", "документов", "все", "список", "какие"])
+        refersBack = take(words: Self.backReferences)
         wantsAddress = take(prefixes: ["адрес", "пропис", "регистрац", "зарегистр", "жительств", "прожива"])
             || take(words: ["живет", "живёт"])
 
@@ -213,6 +219,15 @@ struct ChatIntent: Equatable {
         merged.wantsAddress = previous.wantsAddress
         return merged
     }
+
+    /// «Этого человека», «у него», «её»: указывают на документ, а не называют
+    /// имя. Владелец на сборке 16: «какой день рождения у этого человека» — эти
+    /// слова считались именем, и ответа не было
+    static let backReferences: Set<String> = [
+        "этого", "этой", "этому", "этим", "этот", "эта", "эту", "этих", "тот", "того", "той",
+        "человека", "человек", "человеку", "него", "неё", "нее", "ему", "ей", "нём", "нем", "ней",
+        "его", "её", "ее", "их", "них", "владельца", "владелец", "хозяина", "хозяйки",
+    ]
 
     /// Слова просьбы, а не содержания: «покажи», «найди», «дай»
     static let fillerWords: Set<String> = [
@@ -273,6 +288,20 @@ struct ChatRouter {
            var reply = await chosen(id, intent: intent) {
             reply.isConfident = true
             return (reply, [:])
+        }
+        // «Какой день рождения у этого человека?» без прошлого ответа: о том,
+        // что только что добавили, иначе — как о паспорте без имени
+        if intent.types.isEmpty, intent.nameWords.isEmpty, !intent.fieldKeys.isEmpty || intent.wantsAllFields || intent.wantsExpiry {
+            if intent.refersBack, let id = await justAddedPersonalDocument(), var reply = await chosen(id, intent: intent) {
+                reply.isConfident = true
+                return (reply, [:])
+            }
+            var asked = intent
+            asked.types = intent.wantsExpiry ? [.passportIntl, .passportRU, .driverLicense] : [.passportRU, .passportIntl]
+            if var reply = await personalDocument(asked) {
+                reply.isConfident = true
+                return (reply, [:])
+            }
         }
         if intent.types.contains(where: \.isPersonal) {
             if var reply = await personalDocument(intent) {
@@ -488,6 +517,15 @@ struct ChatRouter {
             reply.cards.append(.clarify(question: "Ещё есть:", options: options))
         }
         return reply
+    }
+
+    /// Удостоверение, добавленное последним, — если не больше получаса назад:
+    /// «этот человек» сразу после загрузки паспорта — это он
+    private func justAddedPersonalDocument() async -> Int64? {
+        let documents = await search.documents(ofTypes: DocumentType.allCases.filter(\.isPersonal))
+        let dated = documents.compactMap { document in search.file(for: document).map { (document.id, $0.file.addedAt) } }
+        guard let newest = dated.max(by: { $0.1 < $1.1 }), Date().timeIntervalSince(newest.1) < 30 * 60 else { return nil }
+        return newest.0
     }
 
     /// Первый личный документ из прошлого ответа
@@ -824,10 +862,13 @@ struct ChatRouter {
             let keys = intent.fieldKeys.filter(available.contains)
             guard !keys.isEmpty else {
                 let names = intent.fieldKeys.map { "«\(FieldKey.title($0))»" }.joined(separator: ", ")
-                return ChatReply(
-                    text: "В файле не распознано поле \(names). Вот сам документ — сверьте по фото:",
-                    cards: [.document(documentID: document.id)]
-                )
+                // Только что загрузили — облако или модель ещё читают: это не «нет поля»
+                let progress = search.progress
+                let reading = progress.pending + progress.cloudPending + progress.modelPending
+                let text = reading > 0
+                    ? "Документ ещё распознаётся (осталось \(reading)) — поле \(names) появится через минуту. Пока — сам документ:"
+                    : "В файле не распознано поле \(names). Вот сам документ — сверьте по фото:"
+                return ChatReply(text: text, cards: [.document(documentID: document.id)])
             }
             return ChatReply(text: "Нажмите на поле, чтобы скопировать:", cards: [.fields(documentID: document.id, keys: keys)])
         }

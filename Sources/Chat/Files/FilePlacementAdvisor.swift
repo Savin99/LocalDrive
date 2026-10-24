@@ -21,14 +21,24 @@ struct FilePlacementAdvisor {
         return FileProposal(summary: placement.headline, actions: [placement.action])
     }
 
-    /// Ответ чата на вложения без облака: одно предложение на все файлы
-    func localReply(for attachments: [ChatAttachment]) async -> ChatReply {
+    /// Ответ чата на вложения без облака: одно предложение на все файлы.
+    /// `readings` — уже прочитанное (сессия читает вложения сама и запоминает)
+    func localReply(for attachments: [ChatAttachment], readings: [String: Reading] = [:]) async -> ChatReply {
         guard !attachments.isEmpty else {
             return ChatReply(text: "Пришлите файл — подскажу, куда его положить.", cards: [])
         }
         var placements: [Placement] = []
         for attachment in attachments {
-            placements.append(await Self.place(attachment, store: store, search: search))
+            placements.append(await Self.place(attachment, store: store, search: search, reading: readings[attachment.id]))
+        }
+        // Что за документ и чей — сразу: «Это паспорт РФ — Иванова А. С.»
+        let recognized = placements.compactMap { placement -> String? in
+            let analysis = placement.analysis
+            guard analysis.type != .other else { return nil }
+            let owner = analysis.fields.first { $0.key == FieldKey.fullName }?.value ?? ""
+            let country = analysis.fields.first { $0.key == FieldKey.country }?.value
+            let title = analysis.type.title(country: country)
+            return owner.isEmpty ? title : "\(title) — \(ChatRouter.shortName(owner))"
         }
         let proposal = FileProposal(
             summary: placements.count == 1
@@ -37,7 +47,8 @@ struct FilePlacementAdvisor {
             actions: placements.map(\.action)
         )
         // Строки действий — в карточке, текст ответа их не повторяет
-        let text = "Предлагаю так. Ничего не изменится, пока вы не нажмёте «Выполнить»:"
+        let lead = recognized.isEmpty ? "" : "Это " + recognized.joined(separator: ", ") + ". Спрашивайте по нему — отвечу.\n"
+        let text = lead + "Предлагаю так. Ничего не изменится, пока вы не нажмёте «Выполнить»:"
         return ChatReply(text: text, cards: [.proposal(proposal)])
     }
 
@@ -49,12 +60,25 @@ struct FilePlacementAdvisor {
         let line: String
         /// Заголовок карточки: что это за файл. Куда его положить, видно в строке действия
         let headline: String
+        /// Что прочитано: вид и поля
+        var analysis = DocumentAnalysis.unknown
     }
 
-    static func place(_ attachment: ChatAttachment, store: VaultStore, search: SearchService) async -> Placement {
+    /// Текст вложения и что в нём узнано — тот же разбор, что у индекса
+    struct Reading: Sendable {
+        let analysis: DocumentAnalysis
+        let text: String
+    }
+
+    static func read(_ attachment: ChatAttachment) async -> Reading {
         let extracted = (try? await DocumentTextExtractor.extract(from: attachment.url)) ?? .empty
-        let analysis = DocumentAnalyzer.analyze(extracted)
-        let text = extracted.pages.map(\.text).joined(separator: "\n")
+        return Reading(analysis: DocumentAnalyzer.analyze(extracted), text: extracted.pages.map(\.text).joined(separator: "\n"))
+    }
+
+    static func place(_ attachment: ChatAttachment, store: VaultStore, search: SearchService, reading: Reading? = nil) async -> Placement {
+        let known = if let reading { reading } else { await Self.read(attachment) }
+        let analysis = known.analysis
+        let text = known.text
 
         var target: FolderTarget?
         var reason = ""
@@ -78,7 +102,8 @@ struct FilePlacementAdvisor {
         return Placement(
             action: .saveAttachment(attachmentID: attachment.id, folder: destination, name: name),
             line: line,
-            headline: headline
+            headline: headline,
+            analysis: analysis
         )
     }
 

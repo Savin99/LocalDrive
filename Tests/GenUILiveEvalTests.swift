@@ -304,7 +304,9 @@ final class GenUILiveEvalTests: XCTestCase {
                      "A5 «регистрацию тоже»", "B1 модель: «мой паспорт» → чей?", "B2 модель: все данные", "B3 модель: прописка",
                      // Вопросы владельца 24.10.2026: «дата рождения Ольги» думала больше 30 с
                      "C1 «дата рождения Ольги» < 1 с", "C2 «сколько лет Ольге» < 1 с", "C3 «а у Ильи?» < 1 с",
-                     "C4 «фото паспорта Ольги» < 1 с", "C5 «перенеси его в папку Ольга» < 1 с", "C6 чип «Номер паспорта» < 1 с"].map { Step(name: $0) }
+                     "C4 «фото паспорта Ольги» < 1 с", "C5 «перенеси его в папку Ольга» < 1 с", "C6 чип «Номер паспорта» < 1 с",
+                     // Сборка 16 на iPhone: «какой день рождения у этого человека» — без ответа
+                     "C7 «какой день рождения у этого человека?» < 1 с", "C8 «какой день рождения у Ильи» < 1 с"].map { Step(name: $0) }
         let passports = await search.documents(ofTypes: [.passportRU])
         let olga = try XCTUnwrap(passports.first { $0.fileName == "паспорт Ольги.txt" }?.id)
         func record(_ index: Int, _ passed: Bool, _ miss: String, _ started: Date) {
@@ -389,6 +391,11 @@ final class GenUILiveEvalTests: XCTestCase {
                 message?.cards.contains { $0.card == .document(documentID: olga) } == true
             }
             try await quick(13, "Номер паспорта") { fields($0).map { $0.0 == savin && $0.1 == [FieldKey.seriesNumber] } ?? false }
+            // «Этот человек» — тот, чей паспорт только что показан
+            session.send("фото паспорта Ольги")
+            try await finish(session)
+            try await quick(14, "какой день рождения у этого человека?", birth(olga))
+            try await quick(15, "какой день рождения у Ильи", birth(savin))
 
             // (B) модель без правил: тот же разговор, исправленная инструкция
             search.owner.clear()
