@@ -66,10 +66,34 @@ final class ChatModelTests: XCTestCase {
 
     // MARK: - План модели
 
+    /// С 24.10.2026 вопросы, на которые правила знают точный ответ, модель
+    /// не получает: «номер паспорта» и «а загран?» отвечают правила, сразу.
+    /// Модель — для того, чего правила не поняли, и видит историю разговора
     func testModelPlanAnswersFollowUp() async throws {
         try await indexPassports()
         let travel = try await document(.passportIntl)
         let planner = FakePlanner(plan: ChatPlan(action: .document, types: [.passportIntl], fields: [FieldKey.seriesNumber]))
+        let session = ChatSession(search: search, planner: { planner })
+
+        session.send("номер паспорта")
+        _ = try await reply(of: session)
+        session.send("а другой какой?")
+        let answer = try await reply(of: session)
+
+        XCTAssertEqual(answer.cards.map(\.card), [.fields(documentID: travel.id, keys: [FieldKey.seriesNumber])])
+        let asked = await planner.received
+        XCTAssertEqual(asked.map(\.question), ["а другой какой?"], "точный вопрос ушёл в модель")
+        // Прошлый вопрос — в истории вместе с планом, по которому на него ответили
+        XCTAssertEqual(asked.last?.history.map(\.question), ["номер паспорта"])
+        XCTAssertEqual(asked.last?.history.first?.plan.fields, [FieldKey.seriesNumber])
+    }
+
+    /// «Номер паспорта» → «а загран?»: то же поле другого документа — правила,
+    /// без модели. Раньше это понимала только модель и ждала её загрузки
+    func testEllipticFollowUpIsAnsweredByRules() async throws {
+        try await indexPassports()
+        let travel = try await document(.passportIntl)
+        let planner = FakePlanner(plan: ChatPlan(action: .answer, text: "Не знаю"))
         let session = ChatSession(search: search, planner: { planner })
 
         session.send("номер паспорта")
@@ -79,10 +103,8 @@ final class ChatModelTests: XCTestCase {
 
         XCTAssertEqual(answer.cards.map(\.card), [.fields(documentID: travel.id, keys: [FieldKey.seriesNumber])])
         let asked = await planner.received
-        XCTAssertEqual(asked.last?.question, "а загран?")
-        // Прошлый вопрос — в истории вместе с планом, по которому на него ответили
-        XCTAssertEqual(asked.last?.history.map(\.question), ["номер паспорта"])
-        XCTAssertEqual(asked.last?.history.first?.plan.fields, [FieldKey.seriesNumber])
+        XCTAssertTrue(asked.isEmpty, "модель спросили, хотя правила знали ответ")
+        XCTAssertFalse(answer.steps.isEmpty, "в ответе нет шагов — экрану нечего показать")
     }
 
     func testModelNeverSeesFieldValues() async throws {
@@ -93,10 +115,13 @@ final class ChatModelTests: XCTestCase {
         session.send("мой паспорт")
         let first = try await reply(of: session)
         XCTAssertFalse(first.cards.isEmpty)
-        session.send("а код подразделения?")
+        // «А код подразделения?» правила отвечают сами — модель получает
+        // вопрос, который им не по силам, но с историей прошлого ответа
+        session.send("а что ещё есть?")
         _ = try await reply(of: session)
 
         let asked = await planner.received
+        XCTAssertFalse(asked.isEmpty, "модель не спросили")
         let prompts = asked.map { request in
             ChatModelPrompt.messages(question: request.question, history: request.history, inventory: request.inventory)
                 .map(\.content).joined(separator: "\n")

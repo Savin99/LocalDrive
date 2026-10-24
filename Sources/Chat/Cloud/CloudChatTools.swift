@@ -8,6 +8,8 @@ import Foundation
 final class CloudChatTools {
     private let search: SearchService
     private let proposals: FileProposalMaker?
+    /// «Карточки»: найти, показать, предложить новую (CloudChatFactTools)
+    var facts: FactStore?
     /// Номера и коды документов, которые проходили через инструменты: в
     /// ответе модели они закрываются маской, даже если она их угадала
     private var sensitive: Set<String> = []
@@ -22,6 +24,9 @@ final class CloudChatTools {
     }
 
     func run(_ name: String, arguments: CloudJSON, cards: inout [ChatCard]) async -> CloudJSON {
+        if CloudChatFactTools.names.contains(name) {
+            return CloudChatFactTools.run(name, arguments: arguments, facts: facts, cards: &cards)
+        }
         switch name {
         case "search_documents": return await searchDocuments(arguments)
         case "list_documents": return await listDocuments(arguments)
@@ -358,7 +363,7 @@ enum CloudChatPrompt {
     static let system = """
     Ты — помощник в LocalDrive, личном хранилище документов на iPhone. Отвечай по-русски, коротко: одна-три фразы.
     Документы, папки и файлы узнавай только через инструменты. Других папок, кроме тех, что вернёт list_folders, нет — не говори о других.
-    Никогда не пиши в тексте серии, номера и коды документов. Данные документа показывай карточкой show_cards (fields) и включай все поля, которые просят, — серию и номер тоже: карточка сама закроет номер маской до Face ID.
+    Никогда не пиши в тексте серии, номера и коды документов. Данные документа показывай карточкой show_cards (fields) и включай все поля, которые просят, — серию и номер тоже: карточка сама закроет номер маской.
     Чтобы посмотреть сам документ — штамп регистрации, отметку о браке, детей, — вызови view_document: страницы придут картинками. Не отвечай «не нашёл», пока не посмотрел вероятный документ.
     Паспорт РФ хранится разворотами — отдельными документами в одной папке: прописка, брак, дети — на других разворотах (other_pages в get_document, в списке документов — рядом).
     Если вопрос неоднозначный — например, подходят паспорта разных людей, — покажи карточку clarify с вариантами.
@@ -371,7 +376,10 @@ enum CloudChatPrompt {
     private static let documentTypes: CloudJSON = .array(DocumentType.allCases.map { .string($0.rawValue) })
     private static let fieldKeys: CloudJSON = .array(FieldKey.order.map { .string($0) })
 
-    static let tools: CloudJSON = [
+    /// Инструменты документов и файлов, а за ними — «Карточек»
+    static let tools: CloudJSON = .array((documentTools.array ?? []) + CloudChatFactTools.tools)
+
+    private static let documentTools: CloudJSON = [
         [
             "name": "search_documents",
             "description": "Поиск документов по тексту, названию, владельцу. Возвращает id (d…), вид, папку, владельца и выдержку.",

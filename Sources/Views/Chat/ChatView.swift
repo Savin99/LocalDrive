@@ -9,8 +9,8 @@ struct ChatView: View {
     let session: ChatSession
 
     @Environment(SearchService.self) private var search
-    @Environment(LockManager.self) private var lock
     @Environment(VaultStore.self) private var store
+    @Environment(FactStore.self) private var facts
     @Environment(\.isOffscreenPage) private var isOffscreenPage
 
     @State private var draft = ""
@@ -24,6 +24,8 @@ struct ChatView: View {
     @State private var isDropTargeted = false
     /// Подтверждение действия из ответа интерфейсом: напоминание
     @State private var confirmation: GenUIConfirmation?
+    /// Что лежит в буфере: фото, PDF, файл — строка «Вставить» над полем ввода
+    @State private var clipboard: ClipboardKind?
 
     /// Подсказки пустого чата: текст уходит сообщением, значок — серый, как в ChatGPT
     private static let suggestions: [(text: String, symbol: String)] = [
@@ -63,6 +65,14 @@ struct ChatView: View {
                     }
                     if let status = IndexStatusLine.text(for: search.progress) {
                         IndexStatusLine(text: status)
+                    }
+                    // В буфере фото или документ — «Вставить» одним касанием
+                    if let clipboard {
+                        ClipboardPasteBar(kind: clipboard, inbox: session.inbox) {
+                            withAnimation(.snappy(duration: 0.2)) { self.clipboard = nil }
+                        } onAdded: { _ in
+                            composerFocused = false
+                        }
                     }
                     ChatAttachmentStrip(inbox: session.inbox)
                     composer
@@ -122,6 +132,7 @@ struct ChatView: View {
         .environment(session.inbox)
         .onAppear {
             session.useFiles(store)
+            session.useFacts(facts)
             session.useGenUIHooks(genuiHooks)
         }
         .confirmationDialog(
@@ -134,6 +145,7 @@ struct ChatView: View {
         }
         // MainView не листает страницы свайпом, начатым над полем ввода
         .preference(key: ChatComposerHeightKey.self, value: composerAreaHeight)
+        .modifier(ClipboardWatcher(kind: $clipboard))
     }
 
     // MARK: - Пустой чат
@@ -256,7 +268,9 @@ struct ChatView: View {
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 6) {
             attachButton
-            TextField("Спросить или найти", text: $draft, axis: .vertical)
+            // С вложением подсказка говорит, что будет: «↑» — предложу папку,
+            // «положи в Семью» — сразу туда
+            TextField(session.inbox.draft.isEmpty ? "Спросить или найти" : "«Положи в …» или ↑ — предложу папку", text: $draft, axis: .vertical)
                 .font(.body)
                 .foregroundStyle(Theme.ink)
                 .lineLimit(1...5)
@@ -360,15 +374,12 @@ struct ChatView: View {
     // MARK: - Действия ответа интерфейсом
 
     /// Кнопки и формы ответа интерфейсом: вопрос — в чат, файл — в просмотр,
-    /// номер — после Face ID, напоминание — с подтверждением
+    /// номер — открывается, напоминание — с подтверждением
     private var genuiHooks: GenUIChatHooks {
         GenUIChatHooks(
             send: { text in send(text) },
             open: { document in opened = OpenedFile(file: document.file, files: [document.file], page: nil) },
             copy: { _, field in
-                if FieldKey.isSensitive(field.key) {
-                    guard await setRevealed(true) else { return false }
-                }
                 copy(field.value)
                 return true
             },
@@ -421,18 +432,15 @@ struct ChatView: View {
         )
     }
 
+    /// Номер закрыт маской от чужих глаз, открывается касанием. Face ID здесь
+    /// больше нет: владелец 24.10.2026 — «убери Face ID», а скопировать номер
+    /// паспорта должно быть делом одного касания
     private func setRevealed(_ revealed: Bool) async -> Bool {
-        guard revealed else {
-            session.revealsSensitive = false
-            return false
-        }
-        if session.revealsSensitive { return true }
-        let confirmed = await lock.confirmOwner(reason: "Показать номер документа")
-        session.revealsSensitive = confirmed
-        return confirmed
+        session.revealsSensitive = revealed
+        return revealed
     }
 
-    /// Лист правки показывает значение целиком — номер открывается только после Face ID
+    /// Лист правки показывает значение целиком
     private func startEditing(_ field: DocumentField, of document: ChatDocument) async {
         if FieldKey.isSensitive(field.key) {
             guard await setRevealed(true) else { return }
@@ -522,9 +530,13 @@ private struct MessageRow: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("chatNotice")
                 }
-                // Облако думает: одна строка «Думает · N с», рассуждение — по касанию
+                // Что чат делает: живая лента шагов, потом — одна строка
+                ChatStepsView(steps: message.steps, isLive: message.isPending, askedAt: message.askedAt, finishedAt: message.finishedAt)
+                // Облако думает: одна строка «Думает · N с», рассуждение — по
+                // касанию. Если шаги уже видны, живой строки не нужно — облако
+                // в ленте шагов со своим счётчиком
                 let thinking = message.isPending && message.startedAt != nil && message.text.isEmpty && message.cards.isEmpty
-                    && (message.genui?.blocks.isEmpty ?? true)
+                    && (message.genui?.blocks.isEmpty ?? true) && message.steps.isEmpty
                 if !message.thoughts.isEmpty || thinking {
                     ReasoningBlock(text: message.thoughts, seconds: message.thinkingSeconds, startedAt: message.startedAt, isLive: thinking)
                 }
@@ -536,7 +548,7 @@ private struct MessageRow: View {
                         appCard: { card in AnyView(GenUIAppCardView(card: card)) }
                     ))
                     .accessibilityIdentifier("chatInterface")
-                } else if message.isPending, message.text.isEmpty, message.cards.isEmpty, message.startedAt == nil {
+                } else if message.isPending, message.text.isEmpty, message.cards.isEmpty, message.startedAt == nil, message.steps.isEmpty {
                     TypingIndicator()
                 } else if !message.text.isEmpty {
                     // Ответ без пузыря: текст прямо на странице; у облака он

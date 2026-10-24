@@ -522,18 +522,23 @@ final class SearchIndexStore {
         static func failed(_ revision: String) -> String { "none:\(revision)" }
     }
 
-    /// Удостоверения из разрешённых папок, которые эта модель ещё не читала
+    /// Удостоверения из разрешённых папок, которые ещё не читала ни одна модель.
+    /// Прочитанное другой моделью заново не читается: владелец 24.10.2026 сменил
+    /// модель — и приложение принялось перечитывать всё. Новая модель читает
+    /// новые файлы и те, что прежней не дались («none:»); перечитать всё —
+    /// отдельной кнопкой (`resetModelMarks`)
     func modelCandidates(types: [DocumentType], revision: String, folders: Set<UUID>) throws -> [ModelReadCandidate] {
         guard !types.isEmpty, !folders.isEmpty else { return [] }
         let typeMarks = Array(repeating: "?", count: types.count).joined(separator: ", ")
         let folderMarks = Array(repeating: "?", count: folders.count).joined(separator: ", ")
         var values: [any SQLiteBindable] = types.map(\.rawValue)
         values.append(contentsOf: folders.map(\.uuidString))
-        values.append(contentsOf: [ModelMark.read(revision), ModelMark.notNeeded(revision), ModelMark.failed(revision)])
+        values.append(ModelMark.failed(revision))
         return try db.query("""
             SELECT id, folder_id, file_name, type, file_size, file_modified FROM document
             WHERE type IN (\(typeMarks)) AND folder_id IN (\(folderMarks)) AND failed = 0
-                AND (model_revision IS NULL OR model_revision NOT IN (?, ?, ?))
+                AND (model_revision IS NULL
+                     OR (substr(model_revision, 1, 5) = 'none:' AND model_revision != ?))
             ORDER BY indexed_at DESC
             """, values) { row in
             ModelReadCandidate(
@@ -618,11 +623,14 @@ final class SearchIndexStore {
         guard !types.isEmpty, !folders.isEmpty else { return ModelCounts() }
         let typeMarks = Array(repeating: "?", count: types.count).joined(separator: ", ")
         let folderMarks = Array(repeating: "?", count: folders.count).joined(separator: ", ")
-        var values: [any SQLiteBindable] = [ModelMark.read(revision)]
-        values.append(contentsOf: types.map(\.rawValue))
+        var values: [any SQLiteBindable] = types.map(\.rawValue)
         values.append(contentsOf: folders.map(\.uuidString))
+        // Прочитанным считается прочитанное любой моделью: отметки «rules:» и
+        // «none:» — не чтение
         return try db.query("""
-            SELECT count(*), coalesce(sum(model_revision = ?), 0) FROM document
+            SELECT count(*), coalesce(sum(model_revision IS NOT NULL
+                AND substr(model_revision, 1, 6) != 'rules:' AND substr(model_revision, 1, 5) != 'none:'), 0)
+            FROM document
             WHERE type IN (\(typeMarks)) AND folder_id IN (\(folderMarks))
             """, values) { row in ModelCounts(identity: row.int(0), read: row.int(1)) }.first ?? ModelCounts()
     }
@@ -634,12 +642,11 @@ final class SearchIndexStore {
             [folderID.uuidString, fileName]
         ) { row in (DocumentType(rawValue: row.text(0)) ?? .other, row.isNull(1) ? nil : row.text(1)) }
         guard let (type, mark) = rows.first, types.contains(type) else { return nil }
-        switch mark {
-        case ModelMark.read(revision): return .read
-        case ModelMark.notNeeded(revision): return .notNeeded
-        case ModelMark.failed(revision): return .failed
-        default: return .waiting
-        }
+        guard let mark else { return .waiting }
+        if mark.hasPrefix("rules:") { return .notNeeded }
+        // Не далось другой модели — эта ещё попробует
+        if mark.hasPrefix("none:") { return mark == ModelMark.failed(revision) ? .failed : .waiting }
+        return .read
     }
 
     // MARK: - Облако
@@ -649,18 +656,30 @@ final class SearchIndexStore {
     enum CloudMark {
         static func skipped(_ mark: String) -> String { "\(mark)#skip" }
         static func failed(_ mark: String) -> String { "\(mark)#fail" }
+        /// Версия схемы ответа: «cloud3:» из «cloud3:openai:gpt-6.1-sol». Её
+        /// повышают, когда облако должно вернуть новое (метаданные, прописку)
+        static func generation(_ mark: String) -> String {
+            String(mark.prefix { $0 != ":" }) + ":"
+        }
     }
 
-    /// Документы разрешённых папок, которые облако с этими настройками ещё не читало
+    /// Документы разрешённых папок, которые облако этой версии схемы ещё не
+    /// читало. Другая модель или сервис прочитанное заново не отправляют —
+    /// это страницы и деньги (владелец 24.10.2026: «поменял модель — зачем
+    /// всё заново распознала»). Не далось прежней модели — эта попробует;
+    /// перечитать всё — отдельной кнопкой (`resetCloudMarks`)
     func cloudCandidates(mark: String, folders: Set<UUID>) throws -> [ModelReadCandidate] {
         guard !folders.isEmpty else { return [] }
         let folderMarks = Array(repeating: "?", count: folders.count).joined(separator: ", ")
+        let generation = CloudMark.generation(mark)
         var values: [any SQLiteBindable] = folders.map(\.uuidString)
-        values.append(contentsOf: [mark, CloudMark.skipped(mark), CloudMark.failed(mark)])
+        values.append(contentsOf: [generation.count, generation, CloudMark.failed(mark)] as [any SQLiteBindable])
         return try db.query("""
             SELECT id, folder_id, file_name, type, file_size, file_modified FROM document
             WHERE folder_id IN (\(folderMarks))
-                AND (cloud_revision IS NULL OR cloud_revision NOT IN (?, ?, ?))
+                AND (cloud_revision IS NULL
+                     OR substr(cloud_revision, 1, ?) != ?
+                     OR (substr(cloud_revision, -5) = '#fail' AND cloud_revision != ?))
             ORDER BY indexed_at DESC
             """, values) { row in
             ModelReadCandidate(
@@ -672,6 +691,21 @@ final class SearchIndexStore {
                 fileModified: row.double(5)
             )
         }
+    }
+
+    /// «Перечитать всё»: отметки облака в разрешённых папках стираются, и
+    /// очередь отправит документы заново — уже выбранной моделью
+    func resetCloudMarks(folders: Set<UUID>) throws {
+        guard !folders.isEmpty else { return }
+        let folderMarks = Array(repeating: "?", count: folders.count).joined(separator: ", ")
+        try db.run("UPDATE document SET cloud_revision = NULL WHERE folder_id IN (\(folderMarks))", folders.map(\.uuidString))
+    }
+
+    /// «Перечитать всё» для модели на iPhone: так же, только отметки модели
+    func resetModelMarks(folders: Set<UUID>) throws {
+        guard !folders.isEmpty else { return }
+        let folderMarks = Array(repeating: "?", count: folders.count).joined(separator: ", ")
+        try db.run("UPDATE document SET model_revision = NULL WHERE folder_id IN (\(folderMarks))", folders.map(\.uuidString))
     }
 
     func markCloud(documentID: Int64, mark: String) throws {
@@ -733,10 +767,14 @@ final class SearchIndexStore {
     func cloudCounts(mark: String, folders: Set<UUID>) throws -> ModelCounts {
         guard !folders.isEmpty else { return ModelCounts() }
         let folderMarks = Array(repeating: "?", count: folders.count).joined(separator: ", ")
-        var values: [any SQLiteBindable] = [mark]
+        let generation = CloudMark.generation(mark)
+        var values: [any SQLiteBindable] = [generation.count, generation]
         values.append(contentsOf: folders.map(\.uuidString))
+        // Прочитанное любой моделью этой версии схемы; «#skip» и «#fail» — не чтение
         return try db.query("""
-            SELECT count(*), coalesce(sum(cloud_revision = ?), 0) FROM document
+            SELECT count(*), coalesce(sum(cloud_revision IS NOT NULL AND substr(cloud_revision, 1, ?) = ?
+                AND substr(cloud_revision, -5) NOT IN ('#skip', '#fail')), 0)
+            FROM document
             WHERE folder_id IN (\(folderMarks))
             """, values) { row in ModelCounts(identity: row.int(0), read: row.int(1)) }.first ?? ModelCounts()
     }
@@ -747,12 +785,11 @@ final class SearchIndexStore {
             [folderID.uuidString, fileName]
         ) { row in row.isNull(0) ? nil : row.text(0) }
         guard let first = rows.first else { return nil }
-        switch first {
-        case mark?: return .read
-        case CloudMark.skipped(mark)?: return .notNeeded
-        case CloudMark.failed(mark)?: return .failed
-        default: return .waiting
-        }
+        guard let stored = first, stored.hasPrefix(CloudMark.generation(mark)) else { return .waiting }
+        if stored.hasSuffix("#skip") { return .notNeeded }
+        // Не далось другой модели — эта ещё попробует
+        if stored.hasSuffix("#fail") { return stored == CloudMark.failed(mark) ? .failed : .waiting }
+        return .read
     }
 
     /// Какая модель прочитала документ. Для проверок

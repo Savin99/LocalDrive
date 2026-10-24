@@ -5,6 +5,7 @@ import SwiftUI
 struct DocumentModelSettingsView: View {
     @Environment(SearchService.self) private var search
     @State private var deleting: DocumentModelChoice?
+    @State private var confirmsReread = false
     @State private var available = DeviceMemory.available
 
     private var models: DocumentModelStore { search.documentModel }
@@ -103,10 +104,21 @@ struct DocumentModelSettingsView: View {
                 .foregroundStyle(state.warning ? Color.orange : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("documentModelProgress")
+            // Другая модель прочитанное не перечитывает — только по кнопке
+            Button("Перечитать все удостоверения") { confirmsReread = true }
+                .font(.footnote.weight(.semibold))
+                .disabled(progress.identityDocuments == 0)
+                .accessibilityIdentifier("documentModelReread")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .cardStyle(cornerRadius: 18)
+        .confirmationDialog("Перечитать все удостоверения моделью?", isPresented: $confirmsReread, titleVisibility: .visible) {
+            Button("Перечитать") { search.rereadAll(cloud: false) }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Другая модель читает только новые документы. Перечитывание всех займёт несколько секунд на каждый документ, пока приложение открыто.")
+        }
     }
 
     /// Что модель делает сейчас — одной строкой

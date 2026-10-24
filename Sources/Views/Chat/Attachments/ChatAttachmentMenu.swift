@@ -13,6 +13,8 @@ struct ChatAttachmentMenu<Content: View>: View {
     @State private var pickingPhotos = false
     @State private var photos: [PhotosPickerItem] = []
     @State private var importing = false
+    /// Сколько файлов не удалось взять — для предупреждения
+    @State private var failedCount = 0
 
     init(
         inbox: ChatAttachmentInbox,
@@ -65,22 +67,33 @@ struct ChatAttachmentMenu<Content: View>: View {
             Task { onAdded(await addPhotos(items)) }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            guard case .success(let urls) = result, !urls.isEmpty else { return }
-            Task { onAdded(await inbox.add(urls: urls)) }
+            switch result {
+            case .success(let urls) where !urls.isEmpty:
+                Task {
+                    let added = await inbox.add(urls: urls)
+                    failedCount = urls.count - added.count
+                    onAdded(added)
+                }
+            case .failure:
+                failedCount = 1
+            default:
+                break
+            }
+        }
+        .alert("Не всё добавилось", isPresented: Binding(get: { failedCount > 0 }, set: { if !$0 { failedCount = 0 } })) {
+            Button("OK", role: .cancel) { failedCount = 0 }
+        } message: {
+            Text("Не удалось взять \(pluralize(failedCount, "файл", "файла", "файлов")). Если он в iCloud, проверьте интернет и попробуйте ещё раз.")
         }
     }
 
-    /// Фото из галереи приходят данными, без имени файла — имя по дате, как
-    /// у фото, импортированных в папку
+    /// Фото из галереи — файлами, с именем по дате, как у фото в папке.
+    /// Неудача не пропадает молча: о ней говорит строка над полем ввода
     private func addPhotos(_ items: [PhotosPickerItem]) async -> [ChatAttachment] {
-        var added: [ChatAttachment] = []
-        let stamp = Date()
-        for item in items {
-            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
-            let type = item.supportedContentTypes.first(where: { $0.conforms(to: .image) }) ?? .jpeg
-            let name = VaultStore.pastedName(suggested: nil, type: type, date: stamp.addingTimeInterval(Double(added.count)))
-            if let attachment = await inbox.add(data: data, named: name) { added.append(attachment) }
-        }
+        let picked = await PickedMediaFile.load(items)
+        let added = await inbox.add(urls: picked.files)
+        PickedMediaFile.cleanUp(picked.files)
+        failedCount = picked.failed + (picked.files.count - added.count)
         return added
     }
 }

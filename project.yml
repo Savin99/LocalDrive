@@ -62,7 +62,6 @@ targets:
       properties:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         CFBundleDisplayName: LocalDrive
-        NSFaceIDUsageDescription: Face ID подтверждает, что номер документа в чате открываете вы
         NSPhotoLibraryUsageDescription: Доступ к галерее нужен, чтобы добавлять фото в ваше хранилище
         NSRemindersFullAccessUsageDescription: Чтобы напомнить заранее о замене документа — без его номера и данных
         UISupportedInterfaceOrientations:

@@ -1,11 +1,12 @@
 import SwiftUI
 import UIKit
 
-// Главный экран: две страницы — чат по документам и библиотека папок.
-// Переключатель «Чат | Файлы» вверху, между страницами можно листать
-// свайпом (решение владельца от 12.10.2026: нижние вкладки занимали много
-// места). Сессия чата живёт в LocalDriveApp: переписка остаётся в памяти
-// до перезапуска приложения. На диск она не пишется
+// Главный экран: три страницы — чат по документам, библиотека папок и
+// «Карточки» с фактами, которых нет в документах (владелец 24.10.2026:
+// «третий свайп, где карточками всё сохраняется»). Переключатель вверху,
+// между страницами можно листать свайпом (решение владельца от 12.10.2026:
+// нижние вкладки занимали много места). Сессия чата живёт в LocalDriveApp:
+// переписка остаётся в памяти до перезапуска приложения. На диск она не пишется
 struct MainView: View {
     @Environment(VaultStore.self) private var store
     @Environment(BackupManager.self) private var backup
@@ -13,6 +14,7 @@ struct MainView: View {
     @Environment(ChatModelStore.self) private var models
     @Environment(ChatSession.self) private var chat
     @Environment(HiddenFolders.self) private var hiddenFolders
+    @Environment(FactStore.self) private var facts
 
     @State private var page = MainPage.chat
     /// Сдвиг страниц за пальцем во время свайпа
@@ -24,6 +26,8 @@ struct MainView: View {
     /// Сколько экранов открыто поверх «Файлов». Внутри папки листание и
     /// переключатель выключены: там работает системный свайп «назад»
     @State private var filesDepth = 0
+    /// Открыта карточка поверх «Карточек» — там свой свайп «назад»
+    @State private var factsDepth = 0
     /// Высота нижней полосы чата — поля ввода с подсказками. Там
     /// горизонтальный свайп листает подсказки, а не страницы
     @State private var composerHeight: CGFloat = 0
@@ -38,7 +42,7 @@ struct MainView: View {
     private static let flingVelocity: CGFloat = 600
 
     private var showsSwitcher: Bool {
-        !(page == .files && filesDepth > 0)
+        !(page == .files && filesDepth > 0) && !(page == .cards && factsDepth > 0)
     }
 
     /// Страница за краем экрана, пока ничего не едет
@@ -60,6 +64,10 @@ struct MainView: View {
                     .frame(width: width)
                     .onPreferenceChange(FilesNavigationDepthKey.self) { filesDepth = $0 }
                     .environment(\.isOffscreenPage, isOffscreen(.files))
+                FactsView()
+                    .frame(width: width)
+                    .onPreferenceChange(FactsNavigationDepthKey.self) { factsDepth = $0 }
+                    .environment(\.isOffscreenPage, isOffscreen(.cards))
             }
             .frame(width: width, alignment: .leading)
             .offset(x: -CGFloat(page.index) * width + dragOffset)
@@ -98,14 +106,17 @@ struct MainView: View {
             backup.scheduleAutomaticBackup()
             search.scheduleReconcile()
         }
+        // «Карточки» лежат в Vault — их правка тоже повод обновить копию
+        .onChange(of: facts.revision) { _, _ in backup.scheduleAutomaticBackup() }
         // Скрытые папки открыли паролем в настройках — показываем их
         .onChange(of: hiddenFolders.revealCount) { _, _ in select(.files) }
     }
 
-    /// 0 — чат, 1 — «Файлы»; во время свайпа дробное: капсула идёт за пальцем
+    /// 0 — чат, 1 — «Файлы», 2 — «Карточки»; во время свайпа дробное:
+    /// капсула идёт за пальцем
     private func progress(width: CGFloat) -> CGFloat {
         guard width > 0 else { return CGFloat(page.index) }
-        return min(max(CGFloat(page.index) - dragOffset / width, 0), 1)
+        return min(max(CGFloat(page.index) - dragOffset / width, 0), CGFloat(MainPage.allCases.count - 1))
     }
 
     private func select(_ target: MainPage) {
@@ -128,14 +139,17 @@ struct MainView: View {
 
     private func pagingGesture(width: CGFloat, height: CGFloat) -> PagerPan {
         PagerPan(space: Self.space) { start, dx in
-            canPage(from: start, dx: dx, height: height)
+            canPage(from: start, dx: dx, width: width, height: height)
         } onChange: { dx in
             isDragging = true
             dragOffset = resisted(dx, width: width)
         } onEnd: { dx, velocity in
+            let forward = dx < -width * 0.3 || (dx < 0 && velocity < -Self.flingVelocity)
+            let back = dx > width * 0.3 || (dx > 0 && velocity > Self.flingVelocity)
             let target: MainPage = switch page {
-            case .chat: dx < -width * 0.3 || (dx < 0 && velocity < -Self.flingVelocity) ? .files : .chat
-            case .files: dx > width * 0.3 || (dx > 0 && velocity > Self.flingVelocity) ? .chat : .files
+            case .chat: forward ? .files : .chat
+            case .files: back ? .chat : (forward ? .cards : .files)
+            case .cards: back ? .files : .cards
             }
             settle(on: target)
         } onCancel: {
@@ -144,7 +158,7 @@ struct MainView: View {
     }
 
     /// Штрих по корню «Файлов»: знак открывает скрытые папки, прямой свайп
-    /// вправо возвращает к чату
+    /// вправо возвращает к чату, влево — открывает «Карточки»
     private var filesStroke: FilesStrokeGesture {
         FilesStrokeGesture(edgeWidth: Self.edgeWidth) {
             page == .files && filesDepth == 0 && !isDragging && !isSettling
@@ -158,16 +172,21 @@ struct MainView: View {
             }
             if stroke.returnsToChat {
                 settle(on: .chat)
+            } else if stroke.opensCards {
+                settle(on: .cards)
             }
         }
     }
 
-    private func canPage(from start: CGPoint, dx: CGFloat, height: CGFloat) -> Bool {
+    private func canPage(from start: CGPoint, dx: CGFloat, width: CGFloat, height: CGFloat) -> Bool {
         switch page {
         case .chat:
             dx < 0 && start.y < height - composerHeight
         case .files:
-            dx > 0 && filesDepth == 0 && start.x < Self.edgeWidth
+            // За пальцем — только от краёв: посередине рисуют секретный знак
+            filesDepth == 0 && (dx > 0 ? start.x < Self.edgeWidth : start.x > width - Self.edgeWidth)
+        case .cards:
+            dx > 0 && factsDepth == 0
         }
     }
 
@@ -175,7 +194,8 @@ struct MainView: View {
     private func resisted(_ dx: CGFloat, width: CGFloat) -> CGFloat {
         switch page {
         case .chat: dx > 0 ? dx * 0.25 : max(dx, -width)
-        case .files: dx < 0 ? dx * 0.25 : min(dx, width)
+        case .files: min(max(dx, -width), width)
+        case .cards: dx < 0 ? dx * 0.25 : min(dx, width)
         }
     }
 }
@@ -257,11 +277,13 @@ struct PagerPan: UIGestureRecognizerRepresentable {
 enum MainPage: CaseIterable, Hashable {
     case chat
     case files
+    case cards
 
     var index: Int {
         switch self {
         case .chat: 0
         case .files: 1
+        case .cards: 2
         }
     }
 
@@ -269,6 +291,7 @@ enum MainPage: CaseIterable, Hashable {
         switch self {
         case .chat: "Чат"
         case .files: "Файлы"
+        case .cards: "Карточки"
         }
     }
 
@@ -276,6 +299,7 @@ enum MainPage: CaseIterable, Hashable {
         switch self {
         case .chat: "pageChat"
         case .files: "pageFiles"
+        case .cards: "pageCards"
         }
     }
 }
@@ -317,7 +341,8 @@ private struct PageSwitcher: View {
     private let segmentHeight: CGFloat = 36
 
     var body: some View {
-        let selected: MainPage = progress < 0.5 ? .chat : .files
+        let index = min(max(Int(progress.rounded()), 0), MainPage.allCases.count - 1)
+        let selected = MainPage.allCases[index]
         HStack(spacing: 0) {
             ForEach(MainPage.allCases, id: \.self) { item in
                 Button {

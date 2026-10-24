@@ -1,12 +1,12 @@
 import Foundation
 
 /// Что умеет экран чата для действий интерфейса. Замыкания даёт ChatView:
-/// открыть файл, скопировать поле после Face ID, напоминание, подтверждение
+/// открыть файл, скопировать поле, напоминание, подтверждение
 struct GenUIChatHooks {
     /// Сообщение в чат от имени человека — как чип
     var send: @MainActor (String) -> Void
     var open: @MainActor (ChatDocument) -> Void
-    /// Скопировать поле. Номер — только после Face ID: false — человек не подтвердил
+    /// Скопировать поле. false — скопировать не вышло
     var copy: @MainActor (ChatDocument, DocumentField) async -> Bool
     var remind: @MainActor (ChatDocument, DocumentValidity) async -> String
     /// Подтверждение действия, меняющего данные: напоминание

@@ -36,4 +36,26 @@ actor ModelResidency {
 
     /// Кто сейчас в памяти. Для проверок
     var current: ObjectIdentifier? { holder }
+
+    // MARK: - Чат важнее фонового чтения
+
+    /// До какого времени чат считается занятым. Владелец 24.10.2026: вопрос
+    /// «дата рождения Ольги» думал больше 30 с — фоновое чтение документов
+    /// после каждого ответа снова вытесняло модель чата, и следующий вопрос
+    /// грузил её заново
+    private var chatActiveUntil = Date.distantPast
+
+    /// Человек спросил чат: минуту модель для документов не грузится
+    func noteChatActivity(for seconds: TimeInterval = 60) {
+        chatActiveUntil = max(chatActiveUntil, Date().addingTimeInterval(seconds))
+    }
+
+    /// Фоновое чтение ждёт, пока чат затихнет. Отмена — уход в фон
+    func waitForChatPause() async throws {
+        while true {
+            let left = chatActiveUntil.timeIntervalSinceNow
+            guard left > 0 else { return }
+            try await Task.sleep(for: .seconds(left))
+        }
+    }
 }

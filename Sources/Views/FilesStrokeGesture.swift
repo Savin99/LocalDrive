@@ -186,13 +186,19 @@ struct FilesStroke {
     /// вдвое больше, чем по вертикали — как у листания за пальцем) и почти
     /// прямой. Знак так не выглядит: у него прогиб больше
     /// StrokeMatcher.lineDeviation
-    var returnsToChat: Bool {
+    var returnsToChat: Bool { isStraightSwipe(rightwards: true) }
+
+    /// Прямой свайп влево — к «Карточкам», по тем же правилам
+    var opensCards: Bool { isStraightSwipe(rightwards: false) }
+
+    private func isStraightSwipe(rightwards: Bool) -> Bool {
         guard !startedOnHorizontalScroll, screen.width > 0,
               let first = points.first, let last = points.last else { return false }
-        let dx = last.x - first.x
+        let sign: CGFloat = rightwards ? 1 : -1
+        let dx = (last.x - first.x) * sign
         let dy = last.y - first.y
         guard dx > 0, dx > 2 * abs(dy),
               StrokeMatcher.deviation(points) <= StrokeMatcher.lineDeviation else { return false }
-        return dx > screen.width * Self.pageFraction || velocity.x > Self.flingVelocity
+        return dx > screen.width * Self.pageFraction || velocity.x * sign > Self.flingVelocity
     }
 }

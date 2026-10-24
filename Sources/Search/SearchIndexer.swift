@@ -375,6 +375,26 @@ actor SearchIndexer {
         startModelWorker()
     }
 
+    /// Перечитать всё выбранной моделью: отметки стираются, очередь
+    /// набирается заново. Идущее чтение доработает, следующий набор возьмёт всё
+    func rereadAll(cloud: Bool) {
+        guard let store = openStore() else { return }
+        do {
+            if cloud {
+                try store.resetCloudMarks(folders: Set(folders.keys))
+                cloudPaused = nil
+                cloudQueue = []
+            } else {
+                try store.resetModelMarks(folders: Set(folders.keys))
+                modelQueue = []
+            }
+        } catch {
+            handle(error)
+        }
+        report()
+        if cloud { startCloudWorker() } else { startModelWorker() }
+    }
+
     private func startCloudWorker() {
         guard cloudWorker == nil, worker == nil, queue.isEmpty, !isSuspended,
               cloudReader != nil, cloudPaused == nil else { return }

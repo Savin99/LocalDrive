@@ -189,7 +189,7 @@ struct GenUIIndexDataProvider: GenUIDataProvider {
         return GenUIRows(columns: ["date", "label", "value", "currency", "document_id"], rows: sorted.prefix(Self.maxRows).map(\.1))
     }
 
-    /// Поля документа. Серия и номер — маской, как в карточке до Face ID
+    /// Поля документа. Серия и номер — маской, как в карточке
     @MainActor
     private func fields(_ source: GenUIDataSource) async -> GenUIRows {
         guard let id = source.documentID,

@@ -49,7 +49,7 @@ enum FieldKey {
         }
     }
 
-    /// Номер документа в карточке закрыт маской, пока не подтверждён Face ID
+    /// Номер документа в карточке закрыт маской, пока его не откроют касанием
     static func isSensitive(_ key: String) -> Bool {
         key == seriesNumber
     }

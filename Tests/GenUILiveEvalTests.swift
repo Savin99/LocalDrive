@@ -301,7 +301,12 @@ final class GenUILiveEvalTests: XCTestCase {
         let index = await search.chatDocumentIndex()
 
         var steps = ["A1 «мой паспорт» → чей?", "A2 «я Илья» → запомнить", "A3 запомнил → «мой паспорт»", "A4 «дай все данные для копирования»",
-                     "A5 «регистрацию тоже»", "B1 модель: «мой паспорт» → чей?", "B2 модель: все данные", "B3 модель: прописка"].map { Step(name: $0) }
+                     "A5 «регистрацию тоже»", "B1 модель: «мой паспорт» → чей?", "B2 модель: все данные", "B3 модель: прописка",
+                     // Вопросы владельца 24.10.2026: «дата рождения Ольги» думала больше 30 с
+                     "C1 «дата рождения Ольги» < 1 с", "C2 «сколько лет Ольге» < 1 с", "C3 «а у Ильи?» < 1 с",
+                     "C4 «фото паспорта Ольги» < 1 с", "C5 «перенеси его в папку Ольга» < 1 с", "C6 чип «Номер паспорта» < 1 с"].map { Step(name: $0) }
+        let passports = await search.documents(ofTypes: [.passportRU])
+        let olga = try XCTUnwrap(passports.first { $0.fileName == "паспорт Ольги.txt" }?.id)
         func record(_ index: Int, _ passed: Bool, _ miss: String, _ started: Date) {
             steps[index].runs += 1
             steps[index].seconds += Date().timeIntervalSince(started)
@@ -333,6 +338,7 @@ final class GenUILiveEvalTests: XCTestCase {
         for _ in 1...runs {
             search.owner.clear()
             let session = ChatSession(search: search, cloudSession: .shared)
+            session.useFiles(store)
             var started = Date()
             session.send("мой паспорт")
             try await finish(session)
@@ -362,6 +368,27 @@ final class GenUILiveEvalTests: XCTestCase {
             session.send("регистрацию тоже")
             try await finish(session)
             record(4, mentions(session.messages.last, registration), describe(session.messages.last), started)
+
+            // (C) Вопросы о человеке и просьбы — правила, без облака и быстро
+            func quick(_ step: Int, _ question: String, _ check: (ChatSession.Message?) -> Bool) async throws {
+                let started = Date()
+                session.send(question)
+                try await finish(session)
+                let fast = Date().timeIntervalSince(started) < 1
+                record(step, check(session.messages.last) && fast, (fast ? "" : "медленно; ") + describe(session.messages.last), started)
+            }
+            let birth: (Int64) -> (ChatSession.Message?) -> Bool = { id in { fields($0).map { $0.0 == id && $0.1 == [FieldKey.birthDate] } ?? false } }
+            try await quick(8, "дата рождения Ольги", birth(olga))
+            try await quick(9, "сколько лет Ольге", birth(olga))
+            try await quick(10, "а у Ильи?", birth(savin))
+            // «Его» — паспорт Ильи из прошлого ответа: он лежит в другой папке
+            try await quick(12, "перенеси его в папку Ольга") { message in
+                message?.cards.contains { if case .proposal = $0.content { true } else { false } } == true
+            }
+            try await quick(11, "фото паспорта Ольги") { message in
+                message?.cards.contains { $0.card == .document(documentID: olga) } == true
+            }
+            try await quick(13, "Номер паспорта") { fields($0).map { $0.0 == savin && $0.1 == [FieldKey.seriesNumber] } ?? false }
 
             // (B) модель без правил: тот же разговор, исправленная инструкция
             search.owner.clear()

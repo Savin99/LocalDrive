@@ -1,7 +1,8 @@
 import SwiftUI
 
-// Поля документа. Значения приходят из базы, номер закрыт маской до Face ID.
-// Тап по строке копирует значение, долгое нажатие — правка и сверка с фото
+// Поля документа. Значения приходят из базы, номер закрыт маской от чужих
+// глаз и открывается касанием «глаза». Тап по строке копирует значение,
+// «Скопировать всё» — все поля одним текстом, долгое нажатие — правка и сверка с фото
 struct FieldsCardView: View {
     let document: ChatDocument
     let keys: [String]
@@ -21,7 +22,10 @@ struct FieldsCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ChatCardHeader(document: document) {
-                if hasSensitive { revealButton }
+                HStack(spacing: 6) {
+                    if fields.count > 1 { copyAllButton }
+                    if hasSensitive { revealButton }
+                }
             }
 
             VStack(spacing: 0) {
@@ -124,11 +128,8 @@ struct FieldsCardView: View {
 
     // MARK: - Действия
 
-    /// Закрытый номер копируется только после Face ID: копирование — тот же показ
+    /// Номер копируется целиком, даже если на экране он под маской
     private func copy(_ field: DocumentField) async {
-        if FieldKey.isSensitive(field.key), !revealed {
-            guard await actions.setRevealed(true) else { return }
-        }
         actions.copy(field.value)
         copyTick &+= 1
         withAnimation(.snappy(duration: 0.2)) { copiedKey = field.key }
@@ -138,13 +139,46 @@ struct FieldsCardView: View {
         }
     }
 
-    /// Лист правки показывает значение целиком — для номера сначала Face ID
+    /// Лист правки показывает значение целиком — номер открывается
     private func edit(_ field: DocumentField) async {
         if FieldKey.isSensitive(field.key), !revealed {
             guard await actions.setRevealed(true) else { return }
         }
         actions.edit(document, field)
     }
+
+    /// «ФИО: …», «Серия и номер: …» — строками, для анкеты или письма
+    static func plainText(of fields: [DocumentField]) -> String {
+        fields.map { "\(FieldKey.title($0.key)): \($0.value)" }.joined(separator: "\n")
+    }
+
+    private var copyAllButton: some View {
+        Button {
+            actions.copy(Self.plainText(of: fields))
+            copyTick &+= 1
+            withAnimation(.snappy(duration: 0.2)) { copiedKey = Self.allKey }
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                if copiedKey == Self.allKey {
+                    withAnimation(.snappy(duration: 0.2)) { copiedKey = nil }
+                }
+            }
+        } label: {
+            Label(copiedKey == Self.allKey ? "Скопировано" : "Всё", systemImage: copiedKey == Self.allKey ? "checkmark" : "doc.on.doc")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Theme.ink)
+                .padding(.horizontal, 10)
+                .frame(height: 34)
+                .background(Theme.surface, in: Capsule())
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Скопировать все поля")
+        .accessibilityIdentifier("chatCopyAll")
+    }
+
+    /// Отметка «скопировано всё» в `copiedKey`
+    private static let allKey = "*all"
 
     private var revealButton: some View {
         Button {

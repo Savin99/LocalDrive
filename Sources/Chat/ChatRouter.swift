@@ -76,6 +76,8 @@ struct ChatIntent: Equatable {
     var wantsAddress = false
     /// «Все данные», «для копирования», «реквизиты»: все поля документа
     var wantsAllFields = false
+    /// «Фото паспорта», «скинь скан», «дошли файл»: нужен сам файл, а не поля
+    var wantsFile = false
 
     init(_ text: String) {
         let tokens = SearchText.tokens(in: text)
@@ -138,6 +140,12 @@ struct ChatIntent: Equatable {
             fieldKeys.append(has(stems: ["мест"]) ? FieldKey.birthPlace : FieldKey.birthDate)
             _ = take(stems: ["рожден", "мест", "дат"], words: ["родился", "родилась"])
         }
+        // «Сколько лет Ольге», «возраст Ильи» — это дата рождения
+        if !fieldKeys.contains(FieldKey.birthDate), has(words: ["возраст", "возраста", "возрасте"])
+            || (has(words: ["сколько"]) && has(words: ["лет", "годиков"])) {
+            _ = take(words: ["возраст", "возраста", "возрасте", "сколько", "лет", "годиков"])
+            fieldKeys.append(FieldKey.birthDate)
+        }
         if !askedWho, has(stems: ["дат"], words: ["когда"]), has(stems: ["выда", "выдач"]) {
             _ = take(stems: ["выда", "выдач", "дат"])
             fieldKeys.append(FieldKey.issueDate)
@@ -153,7 +161,7 @@ struct ChatIntent: Equatable {
             words: ["годен", "замена", "замены", "замену", "заменить", "заменять", "менять", "поменять"]
         )
         // «Дай все данные для копирования»: все поля, вместе с серией и номером —
-        // карточка закроет номер до Face ID
+        // карточка закроет номер маской
         let dataWords: Set<String> = ["данные", "данных", "поля", "полей", "сведения", "сведений", "реквизиты", "реквизитов"]
         let copying = take(prefixes: ["копир", "скопир"])
         let everything = words.contains { ["все", "всё", "полностью", "целиком"].contains($0) }
@@ -161,6 +169,8 @@ struct ChatIntent: Equatable {
             wantsAllFields = true
             _ = take(words: dataWords.union(["все", "всё", "полностью", "целиком"]))
         }
+        wantsFile = take(words: ["фото", "фотку", "фотографию", "фотография", "скан", "сканы", "скриншот", "файл",
+                                 "файлом", "картинку", "оригинал", "pdf", "пдф"])
         wantsList = take(words: ["документы", "документов", "все", "список", "какие"])
         wantsAddress = take(prefixes: ["адрес", "пропис", "регистрац", "зарегистр", "жительств", "прожива"])
             || take(words: ["живет", "живёт"])
@@ -174,6 +184,36 @@ struct ChatIntent: Equatable {
         }
     }
 
+    /// Уточнение с «а»: «а загран?» после «номер паспорта» — тот же вопрос о
+    /// другом документе; «а у Ольги?» после «дата рождения Ильи» — о другом
+    /// человеке. Раньше такие вопросы понимала только модель на iPhone, и
+    /// ответ ждал её загрузки; теперь — правила, сразу
+    func continuing(_ previous: ChatIntent, text: String) -> ChatIntent {
+        let lower = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let elliptic = ["а ", "а,", "и ", "ещё ", "еще ", "тогда ", "теперь "].contains { lower.hasPrefix($0) }
+        guard elliptic, fieldKeys.isEmpty, !wantsExpiry, !wantsAllFields, !wantsAddress else { return self }
+        var merged = self
+        if !types.isEmpty {
+            // Другой документ — прежние поля и срок; человек тот же, если не назван
+            merged.fieldKeys = previous.fieldKeys
+            merged.wantsExpiry = previous.wantsExpiry
+            merged.wantsAllFields = previous.wantsAllFields
+            if nameWords.isEmpty { merged.nameWords = previous.nameWords }
+            return merged
+        }
+        let asked = !previous.types.isEmpty || !previous.fieldKeys.isEmpty || previous.wantsExpiry || previous.wantsAllFields
+        guard !nameWords.isEmpty, asked else { return self }
+        // Другой человек — прежние вид документа, поля и срок
+        merged.types = previous.types
+        merged.countries = previous.countries
+        merged.foreignOnly = previous.foreignOnly
+        merged.fieldKeys = previous.fieldKeys
+        merged.wantsExpiry = previous.wantsExpiry
+        merged.wantsAllFields = previous.wantsAllFields
+        merged.wantsAddress = previous.wantsAddress
+        return merged
+    }
+
     /// Слова просьбы, а не содержания: «покажи», «найди», «дай»
     static let fillerWords: Set<String> = [
         "покажи", "покажите", "показать", "найди", "найдите", "найти", "дай", "дайте",
@@ -182,6 +222,12 @@ struct ChatIntent: Equatable {
         "какой", "какая", "какое", "сколько", "лет", "мне", "наш", "наша", "его", "её",
         // «Регистрацию тоже», «а ещё дату выдачи» — уточнение, не имя
         "тоже", "также", "ещё", "еще", "там", "тут", "здесь",
+        // «Что есть на Ольгу», «информация по Илье» — просьба, не имя
+        "есть", "имеется", "известно", "знаешь", "информация", "информацию", "информации",
+        "инфа", "инфу", "скажи", "подскажи", "напомни", "посмотри",
+        // «Дошли загран», «перешли скан» — просьба прислать, не имя
+        "дошли", "дошлите", "дослать", "пришлите", "перешли", "перешлите", "отправь", "отправьте",
+        "скиньте", "кинь", "покажите", "можешь", "можно",
     ]
 }
 
@@ -191,32 +237,68 @@ struct ChatIntent: Equatable {
 @MainActor
 struct ChatRouter {
     let search: SearchService
+    /// Шаги ответа для экрана: что понял, кого перебирает, что открыл
+    var onStep: ChatStepSink?
+    /// «Карточки» — факты, которых нет в документах. nil — без них
+    var facts: FactStore?
 
     /// Ответ и найденные по пути результаты поиска — из них рендерер берёт
     /// подсветку фрагментов
     /// `context` — документы прошлого ответа: к ним относятся уточнения без
     /// типа и имени, «а дата выдачи?», «адрес какой?»
+    /// `previous` — прошлый вопрос: к нему относятся уточнения «а загран?»,
+    /// «а у Ольги?»
     func reply(
         to text: String,
         preferring documentID: Int64? = nil,
-        context: [Int64] = []
+        context: [Int64] = [],
+        previous: String? = nil
     ) async -> (ChatReply, [Int64: SearchResult]) {
-        let intent = ChatIntent(text)
-        if let documentID, let reply = await chosen(documentID, intent: intent) { return (reply, [:]) }
+        let own = ChatIntent(text)
+        let intent = previous.map { own.continuing(ChatIntent($0), text: text) } ?? own
+        let inherited = intent != own
+        let summary = intent.summary
+        onStep?(.understand, summary.isEmpty ? "Разбираю вопрос" : "Понял: \(summary)")
+        if let documentID, var reply = await chosen(documentID, intent: intent) {
+            reply.isConfident = true
+            return (reply, [:])
+        }
+        // «Дом Камилы», «домофон Камилы», «где живёт Камила» — карточка
+        if let reply = factAnswer(text) { return (reply, [:]) }
         if intent.wantsAddress { return await address(intent, context: context) }
         // «А дата выдачи?» после ответа о паспорте — о том же паспорте. Слово
         // сверх поля («номер договора») значит другой документ: тогда поиск
         if intent.types.isEmpty, intent.nameWords.isEmpty, !intent.fieldKeys.isEmpty || intent.wantsExpiry || intent.wantsAllFields,
            let id = await personalDocument(in: context),
-           let reply = await chosen(id, intent: intent) {
+           var reply = await chosen(id, intent: intent) {
+            reply.isConfident = true
             return (reply, [:])
         }
         if intent.types.contains(where: \.isPersonal) {
-            if let reply = await personalDocument(intent) { return (reply, [:]) }
+            if var reply = await personalDocument(intent) {
+                // «А у Ольги?» — вид документа взят из прошлого вопроса. Точно —
+                // только если нашлись поля или срок: «а другой?» не имя
+                if inherited, reply.cards.contains(where: { card in
+                    switch card {
+                    case .fields, .expiry: true
+                    default: false
+                    }
+                }) {
+                    reply.isConfident = true
+                }
+                return (reply, [:])
+            }
+        }
+        // «Дата рождения Ольги», «данные Ильи», «Ольга» — вид документа не
+        // назван, но в вопросе имя человека из документов
+        if intent.types.isEmpty, !intent.nameWords.isEmpty, let reply = await person(intent, text: text) {
+            return (reply, [:])
         }
         if intent.types.contains(.diploma) {
             if let reply = await documentList(of: [.diploma]) { return (reply, [:]) }
         }
+        // «Камила» — документов на неё нет, а карточка есть
+        if let reply = factAnswer(text, force: true) { return (reply, [:]) }
         return await textSearch(text)
     }
 
@@ -229,6 +311,8 @@ struct ChatRouter {
     ) async -> (ChatReply, [Int64: SearchResult]) {
         let plan = raw.sanitized()
         let intent = ChatIntent(plan: plan)
+        let summary = intent.summary
+        onStep?(.understand, summary.isEmpty ? "Модель разобрала вопрос" : "Модель поняла: \(summary)")
         if let documentID, let reply = await chosen(documentID, intent: intent) { return (reply, [:]) }
         let query = Self.searchQuery(plan.query, message: text)
         switch plan.action {
@@ -323,6 +407,7 @@ struct ChatRouter {
         var guessedOwner: String?
 
         if !intent.nameWords.isEmpty {
+            onStep?(.people, "Перебираю людей: " + Self.peopleList(candidates.map(owner)))
             var named = candidates.filter { Self.nameMatches(intent.nameWords, owner: owner($0)) }
             // Имени нет среди паспортов спрошенного вида — ищем во всех паспортах:
             // «паспорт Рахимова» без слова «иностранный» находит паспорт Таджикистана
@@ -412,6 +497,160 @@ struct ChatRouter {
         return context.first { id in documents.contains { $0.id == id && $0.type.isPersonal } }
     }
 
+    // MARK: - Человек без вида документа
+
+    /// Виды документов по важности: главный документ человека — паспорт РФ
+    static let personalPriority: [DocumentType] = [.passportRU, .passportIntl, .driverLicense, .snils, .inn, .diploma, .certificate, .other]
+
+    /// «Дата рождения Ольги», «сколько лет Илье», «данные Ольги», «Ольга».
+    /// Вид документа не назван, но слова вопроса — имя человека из документов.
+    /// Владелец 24.10.2026: такой вопрос шёл в модель и думал больше 30 с,
+    /// хотя всё нужное уже лежит в базе. Ответ — из полей, сразу. nil — в
+    /// вопросе нет ни одного известного имени: тогда это поиск по тексту
+    private func person(_ intent: ChatIntent, text: String) async -> ChatReply? {
+        let words = intent.nameWords.filter { $0.count >= 3 }
+        guard !words.isEmpty else { return nil }
+        let documents = await search.documents(ofTypes: DocumentType.allCases)
+        guard !documents.isEmpty else { return nil }
+        var fields = await search.fields(for: documents.map(\.id))
+        func owner(_ document: StoredDocument) -> String {
+            fields[document.id]?.first { $0.key == FieldKey.fullName }?.value ?? ""
+        }
+
+        // Люди — по ключу «фамилия имя» латиницей: паспорт РФ и загранпаспорт
+        // одного человека — один человек. Имя для ответа — кириллицей, если есть
+        var names: [String: String] = [:]
+        var owned: [String: [StoredDocument]] = [:]
+        for document in documents {
+            let name = owner(document)
+            let key = Self.personKey(name)
+            guard !key.isEmpty else { continue }
+            if names[key] == nil || name.unicodeScalars.contains(where: { (0x0400...0x04FF).contains($0.value) }) {
+                names[key] = name
+            }
+            owned[key, default: []].append(document)
+        }
+        guard !names.isEmpty else { return nil }
+
+        // Слова имени — те, что подходят хоть к одному человеку. Слово сверх
+        // имени («договор Ольги») — уже не данные человека, а поиск по тексту
+        let nameWords = words.filter { word in names.values.contains { Self.nameMatches([word], owner: $0) } }
+        var guessed = false
+        var matched = names.keys.filter { key in
+            !nameWords.isEmpty && owned[key, default: []].contains { Self.nameMatches(nameWords, owner: owner($0)) }
+        }
+        if nameWords.count < words.count {
+            guard nameWords.isEmpty else { return nil }
+            // Ни одно слово не подошло — может быть, опечатка в имени
+            matched = names.keys.filter { key in owned[key, default: []].contains { Self.nameIsClose(words, owner: owner($0)) } }
+            guard matched.count == 1 else { return nil }
+            guessed = true
+        }
+        guard !matched.isEmpty else { return nil }
+        onStep?(.people, "Перебираю людей: " + Self.peopleList(Array(names.values)))
+
+        // Двое с таким именем — какой из них
+        guard matched.count == 1, let key = matched.first, let fullName = names[key] else {
+            let main = matched.compactMap { key in Self.mainDocument(of: owned[key, default: []]) }
+            func country(_ document: StoredDocument) -> String? {
+                fields[document.id]?.first { $0.key == FieldKey.country }?.value
+            }
+            let options = self.options(for: main, intent: intent, owner: owner, country: country, withNames: true)
+            return ChatReply(text: "Нашёл нескольких людей с таким именем. О ком речь?",
+                             cards: [.clarify(question: nil, options: options)], isConfident: true)
+        }
+        let short = Self.shortName(fullName)
+        let lead = guessed ? "Похоже, вы про «\(short)». " : ""
+        let mine = owned[key, default: []].sorted { first, second in
+            let a = Self.personalPriority.firstIndex(of: first.type) ?? .max
+            let b = Self.personalPriority.firstIndex(of: second.type) ?? .max
+            return a == b ? first.id < second.id : a < b
+        }
+
+        // Срок, все данные и поля удостоверений — тем же путём, что «паспорт
+        // Ольги»: там развороты без имени и чип «Ещё есть»
+        let personal = mine.filter(\.type.isPersonal)
+        if intent.wantsExpiry {
+            let expiring = personal.filter { $0.type != .passportRU }
+            let types = expiring.isEmpty ? [DocumentType.passportRU] : Self.personalPriority.filter { type in expiring.contains { $0.type == type } }
+            var named = intent
+            named.types = types
+            named.nameWords = nameWords.isEmpty ? words : nameWords
+            if var reply = await personalDocument(named) {
+                reply.text = lead + reply.text
+                reply.isConfident = true
+                return reply
+            }
+        }
+        if intent.wantsAllFields, let main = Self.mainDocument(of: mine), var reply = await chosen(main.id, intent: intent) {
+            reply.text = lead + reply.text
+            reply.isConfident = true
+            return reply
+        }
+        if !intent.fieldKeys.isEmpty {
+            // Документ, где эти поля есть: паспорт РФ первым, потом остальные
+            let holder = mine.first { document in
+                intent.fieldKeys.contains { key in fields[document.id]?.contains { $0.key == key } == true }
+            }
+            if let holder, holder.type.isPersonal {
+                var named = intent
+                named.types = [holder.type]
+                named.nameWords = nameWords.isEmpty ? words : nameWords
+                if var reply = await personalDocument(named) {
+                    reply.text = lead + reply.text
+                    reply.isConfident = true
+                    return reply
+                }
+            }
+            if let holder {
+                let keys = intent.fieldKeys.filter { key in fields[holder.id]?.contains { $0.key == key } == true }
+                onStep?(.open, "Открываю: \(holder.type.title) — \(short)")
+                return ChatReply(text: lead + "\(short). Нажмите на поле, чтобы скопировать:",
+                                 cards: [.fields(documentID: holder.id, keys: keys)], isConfident: true)
+            }
+            let asked = intent.fieldKeys.map { "«\(FieldKey.title($0))»" }.joined(separator: ", ")
+            return ChatReply(text: lead + "В документах \(short) поле \(asked) не распознано. Вот документы — сверьте по фото:",
+                             cards: [.fileList(documentIDs: Array(mine.prefix(12).map(\.id)))], isConfident: true)
+        }
+
+        // «Скинь скан Ольги» — сами файлы, главный первым
+        if intent.wantsFile {
+            onStep?(.files, "Беру файлы: \(short)")
+            return ChatReply(text: lead + "Файлы — \(short). Нажмите, чтобы открыть или отправить:",
+                             cards: [.fileList(documentIDs: Array(mine.prefix(12).map(\.id)))], isConfident: true)
+        }
+        // Только имя: главный документ с полями и всё, что есть на человека
+        onStep?(.files, "Собираю документы: \(short)")
+        var cards: [ChatCard] = []
+        if let main = Self.mainDocument(of: mine) {
+            fields.merge(await search.fields(for: [main.id])) { current, _ in current }
+            let keys = FieldKey.order.filter { key in fields[main.id]?.contains { $0.key == key } == true }
+            if !keys.isEmpty { cards.append(.fields(documentID: main.id, keys: keys)) }
+        }
+        cards.append(.fileList(documentIDs: Array(mine.prefix(12).map(\.id))))
+        // Карточки о человеке — «Дом Камилы» — рядом с документами
+        cards += factCards(about: text)
+        return ChatReply(text: lead + "\(short) — \(pluralize(mine.count, "документ", "документа", "документов")):",
+                         cards: cards, isConfident: true)
+    }
+
+    /// Главный документ человека: удостоверение по важности, иначе первый
+    static func mainDocument(of documents: [StoredDocument]) -> StoredDocument? {
+        for type in personalPriority {
+            if let document = documents.first(where: { $0.type == type }) { return document }
+        }
+        return documents.first
+    }
+
+    /// «Савин И. А., Трошина О. В. и ещё 2» — для шага «перебираю людей»
+    static func peopleList(_ names: [String]) -> String {
+        var seen = Set<String>()
+        let unique = names.filter { !$0.isEmpty && seen.insert(personKey($0)).inserted }.map(shortName).sorted()
+        guard !unique.isEmpty else { return "в документах нет имён" }
+        let shown = unique.prefix(4).joined(separator: ", ")
+        return unique.count > 4 ? "\(shown) и ещё \(unique.count - 4)" : shown
+    }
+
     // MARK: - Адрес
 
     /// Адрес полем не распознаётся — штампы регистрации слишком разные. Ответ —
@@ -419,6 +658,7 @@ struct ChatRouter {
     /// паспорту из прошлого ответа. Если в папке паспорта нескольких людей, чья
     /// страница, по тексту не понять: тогда так и говорим
     private func address(_ intent: ChatIntent, context: [Int64]) async -> (ChatReply, [Int64: SearchResult]) {
+        onStep?(.search, "Ищу страницу с пропиской")
         var people: [StoredDocument] = []
         if !intent.nameWords.isEmpty {
             let passports = await search.documents(ofTypes: Self.passportTypes)
@@ -536,6 +776,12 @@ struct ChatRouter {
         // другом «кем выдан» без имени. Это один документ, а не два. Срок
         // считается по развороту с датой рождения, остальное — по обоим
         let spreads = Self.spreads(of: documents, fields: fields)
+        // «Фото паспорта», «дошли скан»: сами развороты — открыть или отправить
+        if intent.wantsFile, intent.fieldKeys.isEmpty, spreads.count > 1, let primary = spreads.first {
+            onStep?(.open, "Беру файлы: \(primary.type.title), \(pluralize(spreads.count, "разворот", "разворота", "разворотов"))")
+            return ChatReply(text: "Вот развороты — нажмите, чтобы открыть, или «Поделиться»:",
+                             cards: [.fileList(documentIDs: spreads.map(\.id))], isConfident: true)
+        }
         if spreads.count > 1, let primary = spreads.first {
             guard intent.wantsExpiry else {
                 return spreadsReply(primary: primary, extra: Array(spreads.dropFirst()), intent: intent, fields: fields)
@@ -562,11 +808,17 @@ struct ChatRouter {
 
         let available = Set(fields[document.id]?.map(\.key) ?? [])
         let title = document.type.spokenTitle(country: country(document))
+        let name = Self.shortName(owner(document))
+        onStep?(.open, "Открываю: \(document.type.title(country: country(document)))" + (name.isEmpty ? "" : " — \(name)"))
         if intent.wantsExpiry {
             return ChatReply(
                 text: "Срок действия \(document.type.genitiveTitle(country: country(document))):",
                 cards: [.expiry(documentID: document.id)]
             )
+        }
+        if intent.wantsFile, intent.fieldKeys.isEmpty {
+            return ChatReply(text: "Вот \(title) — нажмите, чтобы открыть, или «Поделиться»:",
+                             cards: [.document(documentID: document.id)], isConfident: true)
         }
         if !intent.fieldKeys.isEmpty {
             let keys = intent.fieldKeys.filter(available.contains)
@@ -610,6 +862,8 @@ struct ChatRouter {
         fields: [Int64: [DocumentField]]
     ) -> ChatReply {
         let primaryKeys = Set(fields[primary.id]?.map(\.key) ?? [])
+        let owner = fields[primary.id]?.first { $0.key == FieldKey.fullName }?.value ?? ""
+        onStep?(.open, "Открываю: \(primary.type.title), \(pluralize(extra.count + 1, "разворот", "разворота", "разворотов"))" + (owner.isEmpty ? "" : " — \(Self.shortName(owner))"))
         let wanted = intent.fieldKeys.isEmpty ? FieldKey.order : intent.fieldKeys
         var cards: [ChatCard] = []
         let mainKeys = wanted.filter(primaryKeys.contains)
@@ -775,6 +1029,7 @@ struct ChatRouter {
 
     /// «Дипломные документы»: документы этого типа и остальное из их папок
     private func documentList(of types: [DocumentType]) async -> ChatReply? {
+        onStep?(.files, "Собираю документы: " + types.map(\.title).joined(separator: ", "))
         let typed = await search.documents(ofTypes: types)
         guard !typed.isEmpty else { return nil }
         let folderIDs = Set(typed.map(\.folderID))
@@ -791,6 +1046,7 @@ struct ChatRouter {
     // MARK: - Поиск по тексту
 
     private func textSearch(_ text: String) async -> (ChatReply, [Int64: SearchResult]) {
+        onStep?(.search, "Ищу в тексте документов: «\(text)»")
         let results = await search.search(text)
         let indexed = results.filter { $0.documentID != nil }
         let hits = Dictionary(indexed.map { ($0.documentID!, $0) }, uniquingKeysWith: { first, _ in first })

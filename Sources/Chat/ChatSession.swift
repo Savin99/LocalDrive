@@ -37,6 +37,10 @@ struct ResolvedCard: Identifiable {
         case proposal(FileProposal)
         /// Вложение чата: файл ищет карточка во вложениях
         case attachment(id: String)
+        /// Карточка из «Карточек» и поля, о которых спросили
+        case fact(FactCard, highlighted: Set<UUID>)
+        /// Черновик карточки — «Сохранить» кладёт его в «Карточки»
+        case factProposal(FactCard)
     }
 
     let id = UUID()
@@ -50,6 +54,8 @@ struct ResolvedCard: Identifiable {
 @MainActor
 struct ChatCardResolver {
     let search: SearchService
+    /// «Карточки»: без них карточка-факт из ответа выпадает
+    var facts: FactStore?
 
     func resolve(_ cards: [ChatCard], hits: [Int64: SearchResult] = [:]) async -> [ResolvedCard] {
         let ids = Array(Set(cards.flatMap(\.documentIDs)))
@@ -100,6 +106,13 @@ struct ChatCardResolver {
                 return ResolvedCard(card: card, content: .proposal(proposal))
             case .attachment(let id):
                 return ResolvedCard(card: card, content: .attachment(id: id))
+            case .fact(let id, let items):
+                // Карточку удалили — из ответа она выпадает, как документ
+                guard let fact = facts?.card(id: id) else { return nil }
+                return ResolvedCard(card: card, content: .fact(fact, highlighted: Set(items)))
+            case .factProposal(let draft):
+                guard !draft.items.isEmpty else { return nil }
+                return ResolvedCard(card: card, content: .factProposal(draft))
             }
         }
     }
@@ -141,10 +154,17 @@ final class ChatSession {
         var genuiPerformer: GenUIChatPerformer?
         /// Чип «Запомнить: это я — Савин И. А.»
         var ownerSuggestion: OwnerSuggestion?
+        /// Что чат делал, пока отвечал: понял, перебрал людей, открыл
+        /// документ. Пока ответ идёт — живая лента, потом — одна строка
+        var steps: [ChatStep] = []
+        /// Когда ответ готов — для «нашёл за 0,1 с»
+        var finishedAt: Date?
+        /// Когда пришёл вопрос
+        let askedAt = Date()
     }
 
     private(set) var messages: [Message] = []
-    /// Номера документов открыты после Face ID — до блокировки приложения
+    /// Номера документов открыты касанием «глаза» — до ухода приложения в фон
     var revealsSensitive = false
     /// Отвечает облако: вместо «Отправить» — «Стоп»
     private(set) var answeringInCloud = false
@@ -174,6 +194,8 @@ final class ChatSession {
     let inbox: ChatAttachmentInbox
     /// Хранилище — для подсказки, куда положить вложение без облака
     @ObservationIgnored private var store: VaultStore?
+    /// «Карточки»: факты, которых нет в документах, — «дом Камилы»
+    @ObservationIgnored private(set) var facts: FactStore?
     /// Что умеет экран для действий интерфейса: открыть файл, скопировать,
     /// напомнить, подтвердить. Даёт ChatView
     @ObservationIgnored private var genuiHooks: GenUIChatHooks?
@@ -181,7 +203,7 @@ final class ChatSession {
     init(
         search: SearchService,
         planner: @escaping @MainActor () -> (any ChatPlanning)? = { nil },
-        plannerTimeout: Duration = .seconds(20),
+        plannerTimeout: Duration = .seconds(10),
         cloudSession: URLSession = .shared,
         cloudTimeout: Duration = .seconds(60),
         cloudSilence: Duration = .seconds(20),
@@ -208,6 +230,12 @@ final class ChatSession {
 
     var isAnswering: Bool { messages.last?.isPending == true }
 
+    /// «Карточки» приходят из окружения экрана, как и хранилище
+    func useFacts(_ facts: FactStore) {
+        self.facts = facts
+        cloudEngine?.facts = facts
+    }
+
     /// Замыкания экрана для действий ответа интерфейсом
     func useGenUIHooks(_ hooks: GenUIChatHooks) {
         genuiHooks = hooks
@@ -225,6 +253,8 @@ final class ChatSession {
         guard !trimmed.isEmpty || !attachments.isEmpty, !isAnswering else { return }
         let history = turns()
         let context = contextDocumentIDs()
+        // Прошлый вопрос — для уточнений «а загран?», «а у Ольги?»
+        let previous = messages.last { $0.role == .user && !$0.text.isEmpty }?.text
         messages.append(Message(role: .user, text: trimmed))
         let pending = Message(role: .assistant, text: "", isPending: true)
         messages.append(pending)
@@ -237,40 +267,81 @@ final class ChatSession {
         let configuration = wantsCloud ? cloud.chatConfiguration : nil
 
         cloudTask = Task {
+            let steps = self.stepSink(for: pending.id)
+            defer { self.finishSteps(of: pending.id) }
             // Кто владелец и чей «мой паспорт» — правила, без облака: модель
             // угадывала чужой паспорт (жалоба владельца 13.10.2026)
             if documentID == nil, attachments.isEmpty, let local = await self.ownerAnswer(trimmed, context: context) {
                 await self.show(local, pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
-            var notice: String?
-            if let configuration {
-                // Быстрый путь: однозначный поиск своего документа правила
-                // отвечают сразу — облако думало над «паспорт ильи» минуту.
-                // «Подумать» и вложения — всегда облако
-                if configuration.reasoning != .deep, attachments.isEmpty {
-                    let (local, hits) = await ChatRouter(search: search).reply(to: trimmed, preferring: nil, context: context)
-                    if Self.isConfidentLookup(trimmed, reply: local) {
-                        let cards = await ChatCardResolver(search: search).resolve(local.cards, hits: hits)
-                        if !cards.isEmpty, let index = messages.firstIndex(where: { $0.id == pending.id }) {
-                            messages[index].text = local.text
-                            messages[index].cards = cards
-                            messages[index].plan = ChatPlan(rulesFor: trimmed)
-                            messages[index].isPending = false
-                            // Облако должно знать, что показано: «а адрес?» — о нём
-                            engine(for: configuration).record(question: trimmed, answer: Self.summary(of: local.cards))
-                            return
+            // «Положи его в Семью», «перенеси паспорт Ольги в Документы» —
+            // предложение сразу, без облака: куда класть, человек уже сказал
+            if documentID == nil, attachments.isEmpty, let command = ChatFileCommand(trimmed),
+               let reply = await self.fileCommandReply(command, context: context, steps: steps) {
+                await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
+                return
+            }
+            // «Запомни: у Камилы домофон 45, этаж 3» — черновик карточки. С
+            // облаком разбирает модель: она свободнее раскладывает поля и
+            // подбирает значки; без облака — разбор на iPhone
+            if documentID == nil, attachments.isEmpty, configuration == nil, facts != nil,
+               FactDraftParser.request(in: trimmed) != nil {
+                steps(.understand, "Понял: запомнить")
+                let reply: ChatReply
+                if let draft = FactDraftParser.draft(from: trimmed) {
+                    steps(.propose, "Раскладываю по полям: " + draft.items.map(\.label).joined(separator: ", "))
+                    reply = ChatReply(text: "Проверьте и сохраните — карточка появится в «Карточках»:",
+                                      cards: [.factProposal(draft)], isConfident: true)
+                } else {
+                    reply = ChatReply(text: "Не понял, что запомнить. Напишите, например: «запомни: дом Камилы — домофон 45, этаж 3, адрес Тверская 5».",
+                                      cards: [], isConfident: true)
+                }
+                await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
+                return
+            }
+            // Правила — первыми, при любом чате: точный ответ из базы
+            // («дата рождения Ольги», «паспорт Ильи», «а дата выдачи?»)
+            // показывается сразу. Владелец 24.10.2026: такой вопрос думал
+            // больше 30 с. «Подумать» и вложения — всегда облако
+            var rules: (ChatReply, [Int64: SearchResult])?
+            if attachments.isEmpty, configuration?.reasoning != .deep {
+                var router = ChatRouter(search: search)
+                router.onStep = steps
+                router.facts = facts
+                let local = await router.reply(to: trimmed, preferring: documentID, context: context, previous: previous)
+                rules = local
+                if local.0.isConfident || Self.isConfidentLookup(trimmed, reply: local.0) {
+                    let cards = await ChatCardResolver(search: search, facts: facts).resolve(local.0.cards, hits: local.1)
+                    if !cards.isEmpty, let index = messages.firstIndex(where: { $0.id == pending.id }) {
+                        messages[index].text = local.0.text
+                        messages[index].cards = cards
+                        messages[index].plan = ChatPlan(rulesFor: trimmed)
+                        messages[index].isPending = false
+                        // Облако должно знать, что показано: «а адрес?» — о нём
+                        if let configuration {
+                            engine(for: configuration).record(question: trimmed, answer: Self.summary(of: local.0.cards))
                         }
+                        if let documentID, let suggestion = await self.ownerSuggestion(for: documentID),
+                           let index = messages.firstIndex(where: { $0.id == pending.id }) {
+                            messages[index].ownerSuggestion = suggestion
+                        }
+                        return
                     }
                 }
+            }
+            var notice: String?
+            if let configuration {
+                steps(.think, "Спрашиваю облако · \(configuration.model.chip)")
                 let result = await answerInCloud(trimmed, attachments: attachments, configuration: configuration, pending: pending.id)
                 if result.done { return }
                 notice = result.notice
             } else if wantsCloud {
                 notice = Self.cloudNotice
             }
-            let (reply, hits, plan) = await answer(trimmed, documentID: documentID, context: context, history: history, model: model)
-            let cards = await ChatCardResolver(search: search).resolve(reply.cards, hits: hits)
+            let (reply, hits, plan) = await answer(trimmed, documentID: documentID, context: context, history: history,
+                                                   model: model, rules: rules, steps: steps)
+            let cards = await ChatCardResolver(search: search, facts: facts).resolve(reply.cards, hits: hits)
             if configuration != nil {
                 cloudEngine?.record(question: trimmed, answer: Self.summary(of: reply.cards))
             }
@@ -291,6 +362,32 @@ final class ChatSession {
                 messages[index].ownerSuggestion = suggestion
             }
         }
+    }
+
+    // MARK: - Шаги
+
+    /// Куда роутер, модель и облако пишут шаги ответа `message`: прошлый шаг
+    /// закрывается, новый встаёт в ленту. Одинаковый шаг подряд не дублируется
+    private func stepSink(for message: UUID) -> ChatStepSink {
+        { [weak self] kind, text in
+            guard let self, let index = self.messages.firstIndex(where: { $0.id == message }) else { return }
+            let now = Date()
+            if let last = self.messages[index].steps.last, last.kind == kind, last.text == text { return }
+            if let last = self.messages[index].steps.indices.last, self.messages[index].steps[last].finishedAt == nil {
+                self.messages[index].steps[last].finishedAt = now
+            }
+            self.messages[index].steps.append(ChatStep(kind: kind, text: text, startedAt: now))
+        }
+    }
+
+    /// Ответ готов: последний шаг закрыт, время ответа записано
+    private func finishSteps(of message: UUID) {
+        guard let index = messages.firstIndex(where: { $0.id == message }) else { return }
+        let now = Date()
+        for step in messages[index].steps.indices where messages[index].steps[step].finishedAt == nil {
+            messages[index].steps[step].finishedAt = now
+        }
+        messages[index].finishedAt = now
     }
 
     // MARK: - Владелец
@@ -359,7 +456,7 @@ final class ChatSession {
     }
 
     private func show(_ local: OwnerAnswer, pending: UUID, question: String, configuration: CloudChatEngine.Configuration?) async {
-        let cards = await ChatCardResolver(search: search).resolve(local.reply.cards, hits: local.hits)
+        let cards = await ChatCardResolver(search: search, facts: facts).resolve(local.reply.cards, hits: local.hits)
         guard let index = messages.firstIndex(where: { $0.id == pending }) else { return }
         messages[index].text = local.reply.text
         messages[index].cards = cards
@@ -478,8 +575,24 @@ final class ChatSession {
         let configuration = wantsCloud ? cloud.chatConfiguration : nil
 
         cloudTask = Task {
+            let steps = self.stepSink(for: pending.id)
+            defer { self.finishSteps(of: pending.id) }
+            steps(.files, "Смотрю " + (items.count == 1 ? "вложение «\(items[0].name)»" : pluralize(items.count, "вложение", "вложения", "вложений")))
+            // «Положи в Паспорта» вместе с файлом — куда, уже сказано
+            if let command = ChatFileCommand(trimmed), let store {
+                let target = command.target(in: store)
+                steps(.folders, Self.folderStep(command, target: target, store: store))
+                let proposal = FileProposal(
+                    summary: "В «\(FileProposalBuilder.folderTitle(target, store: store))»",
+                    actions: items.map { .saveAttachment(attachmentID: $0.id, folder: target, name: nil) }
+                )
+                let reply = ChatReply(text: Self.proposalLead, cards: [.proposal(proposal)], isConfident: true)
+                await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
+                return
+            }
             var notice: String?
             if let configuration {
+                steps(.think, "Показываю облаку · \(configuration.model.chip)")
                 var imaged: [CloudChatAttachment] = []
                 var named: [ChatAttachment] = []
                 for item in items {
@@ -502,11 +615,12 @@ final class ChatSession {
 
             let reply: ChatReply
             if let store {
+                steps(.search, "Распознаю и ищу подходящую папку")
                 reply = await FilePlacementAdvisor(store: store, search: search).localReply(for: items)
             } else {
                 reply = ChatReply(text: "Файлы получил, но разложить их сейчас не могу — откройте чат заново.", cards: [])
             }
-            let cards = await ChatCardResolver(search: search).resolve(reply.cards)
+            let cards = await ChatCardResolver(search: search, facts: facts).resolve(reply.cards)
             guard let index = messages.firstIndex(where: { $0.id == pending.id }) else { return }
             messages[index].text = reply.text
             messages[index].cards = cards
@@ -514,6 +628,73 @@ final class ChatSession {
             messages[index].thoughts = ""
             messages[index].isPending = false
         }
+    }
+
+    // MARK: - Просьбы разложить файлы
+
+    static let proposalLead = "Предлагаю так. Ничего не изменится, пока вы не нажмёте «Выполнить»:"
+
+    /// «Ищу папку «Семья»» или «Папки «Семья» нет — создам»
+    static func folderStep(_ command: ChatFileCommand, target: FolderTarget, store: VaultStore) -> String {
+        switch target {
+        case .existing: "Нашёл папку «\(FileProposalBuilder.folderTitle(target, store: store))»"
+        case .new(let name): "Папки «\(name)» нет — предложу создать"
+        }
+    }
+
+    /// «Положи их в Семью» — вложения, которые ещё не разложили, или
+    /// документы прошлого ответа. «Перенеси паспорт Ольги в Документы» — что
+    /// именно, находят правила. nil — чата файлов нет (тесты без хранилища)
+    private func fileCommandReply(_ command: ChatFileCommand, context: [Int64], steps: @escaping ChatStepSink) async -> ChatReply? {
+        guard let store else { return nil }
+        let target = command.target(in: store)
+        var actions: [FileProposal.Action] = []
+        var ids: [Int64] = []
+        if command.refersToContext {
+            let draft = Set(inbox.draft.map(\.id))
+            let waiting = inbox.items.filter { !draft.contains($0.id) }
+            if !waiting.isEmpty {
+                steps(.files, "Беру " + (waiting.count == 1 ? "вложение «\(waiting[0].name)»" : pluralize(waiting.count, "вложение", "вложения", "вложений")))
+                actions = waiting.map { .saveAttachment(attachmentID: $0.id, folder: target, name: nil) }
+            } else {
+                ids = context
+            }
+        } else {
+            var router = ChatRouter(search: search)
+            router.onStep = steps
+            router.facts = facts
+            let (found, _) = await router.reply(to: command.subject, context: context)
+            var seen = Set<Int64>()
+            ids = found.cards.flatMap(\.documentIDs).filter { seen.insert($0).inserted }
+            // Несколько людей или документов — сначала выбрать, какой
+            if ids.isEmpty, found.cards.contains(where: { if case .clarify = $0 { true } else { false } }) {
+                return ChatReply(text: "Какой именно перенести? Выберите, а потом скажите «перенеси его в \(command.destination)».",
+                                 cards: found.cards, isConfident: true)
+            }
+        }
+        if actions.isEmpty, !ids.isEmpty {
+            let documents = await search.documents(ids: ids)
+            let files = ids.compactMap { id in documents.first { $0.id == id } }
+                .map { FileRef(folderID: $0.folderID, name: $0.fileName) }
+            let moving = files.filter { file in
+                if case .existing(let folderID) = target { file.folderID != folderID } else { true }
+            }
+            if !moving.isEmpty {
+                steps(.files, "Беру " + pluralize(moving.count, "файл", "файла", "файлов"))
+                actions = [.moveFiles(files: moving, folder: target)]
+            } else if !files.isEmpty {
+                return ChatReply(text: "Уже лежит в «\(FileProposalBuilder.folderTitle(target, store: store))».", cards: [], isConfident: true)
+            }
+        }
+        guard !actions.isEmpty else {
+            return ChatReply(
+                text: "Не понял, что положить в «\(command.destination)». Пришлите файл через «+» или найдите документ — потом скажите «положи его в \(command.destination)».",
+                cards: [], isConfident: true
+            )
+        }
+        steps(.folders, Self.folderStep(command, target: target, store: store))
+        let proposal = FileProposal(summary: "В «\(FileProposalBuilder.folderTitle(target, store: store))»", actions: actions)
+        return ChatReply(text: Self.proposalLead, cards: [.proposal(proposal)], isConfident: true)
     }
 
     // MARK: - Облако
@@ -541,7 +722,7 @@ final class ChatSession {
             // Карточки, показанные из потока, остаются те же — без мигания
             let cards = reply.cards == shown.raw && messages[index].cards.count == reply.cards.count
                 ? messages[index].cards
-                : await ChatCardResolver(search: search).resolve(reply.cards)
+                : await ChatCardResolver(search: search, facts: facts).resolve(reply.cards)
             guard let index = messages.firstIndex(where: { $0.id == pending }) else { return (true, nil) }
             // Ответ интерфейсом: JSON проверяется целиком. Ход, кончившийся
             // одними карточками, интерфейса не показывает
@@ -617,7 +798,7 @@ final class ChatSession {
     }
 
     private func append(_ card: ChatCard, to message: UUID) async {
-        let resolved = await ChatCardResolver(search: search).resolve([card])
+        let resolved = await ChatCardResolver(search: search, facts: facts).resolve([card])
         guard let index = messages.firstIndex(where: { $0.id == message }) else { return }
         messages[index].cards += resolved
     }
@@ -635,6 +816,7 @@ final class ChatSession {
             return cloudEngine
         }
         let engine = CloudChatEngine(configuration: configuration, search: search, proposals: proposals, session: cloudSession)
+        engine.facts = facts
         cloudEngine = engine
         return engine
     }
@@ -672,13 +854,14 @@ final class ChatSession {
                         feed.feed(delta)
                         self.messages[index].text = feed.model.text
                     case .tool: interface.newRound = true
+                    case .step(let kind, let text): self.stepSink(for: pending)(kind, text)
                     case .cards(let cards):
                         // Карточки — сразу, до текста ответа. Подставляется весь
                         // список: два вызова show_cards не перепутают порядок
                         shown.raw += cards
                         let snapshot = shown.raw
                         Task { @MainActor in
-                            let resolved = await ChatCardResolver(search: self.search).resolve(snapshot)
+                            let resolved = await ChatCardResolver(search: self.search, facts: self.facts).resolve(snapshot)
                             guard shown.raw == snapshot, let index = self.messages.firstIndex(where: { $0.id == pending }),
                                   self.messages[index].isPending else { return }
                             self.messages[index].cards = resolved
@@ -706,24 +889,35 @@ final class ChatSession {
     /// Ответ модели, если она есть и успела, иначе — правила. Чат с моделью
     /// не должен отвечать хуже, чем без неё: если правила узнали личный
     /// документ, а модель увела в поиск или в разговор, верят правилам
+    /// `rules` — ответ правил, если его уже получили: точный ответ сюда не
+    /// доходит, а неточный модель может улучшить
     private func answer(
         _ text: String,
         documentID: Int64?,
         context: [Int64],
         history: [ChatTurn],
-        model: (any ChatPlanning)?
+        model: (any ChatPlanning)?,
+        rules: (ChatReply, [Int64: SearchResult])? = nil,
+        steps: ChatStepSink? = nil
     ) async -> (ChatReply, [Int64: SearchResult], ChatPlan) {
-        let router = ChatRouter(search: search)
+        var router = ChatRouter(search: search)
+        router.onStep = steps
+        router.facts = facts
         // Адрес модель не планирует: его страницу ищут правила
         if let model, !ChatIntent(text).wantsAddress {
+            // Пока человек спрашивает, фоновое чтение документов не вытесняет
+            // модель чата из памяти
+            await ModelResidency.shared.noteChatActivity()
+            steps?(.think, "Модель на iPhone разбирает вопрос")
             let inventory = ChatInventory(documents: await search.documents(ofTypes: DocumentType.allCases))
             if let plan = await Self.plan(with: model, question: text, history: history, inventory: inventory, timeout: plannerTimeout),
                Self.accepts(plan, rules: ChatIntent(text)) {
                 let (reply, hits) = await router.reply(plan: plan, text: text)
                 return (reply, hits, plan)
             }
+            steps?(.think, "Модель не успела — отвечаю по базе")
         }
-        let (reply, hits) = await router.reply(to: text, preferring: documentID, context: context)
+        let (reply, hits) = if let rules { rules } else { await router.reply(to: text, preferring: documentID, context: context) }
         return (reply, hits, ChatPlan(rulesFor: text))
     }
 
@@ -779,7 +973,7 @@ final class ChatSession {
 
     /// Поле исправили или подтвердили — карточки с этим документом перечитываются
     func refresh(documentID: Int64) async {
-        let resolver = ChatCardResolver(search: search)
+        let resolver = ChatCardResolver(search: search, facts: facts)
         for messageIndex in messages.indices {
             for cardIndex in messages[messageIndex].cards.indices {
                 let card = messages[messageIndex].cards[cardIndex].card

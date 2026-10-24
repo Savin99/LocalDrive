@@ -39,9 +39,16 @@ final class BackupFlowUITests: XCTestCase {
         storageRow.tap()
 
         let openButton = app.buttons["Открыть"]
-        if !openButton.waitForExistence(timeout: 10) {
-            // Окно выбора помнит прошлую папку: тогда «Обзор» — и вкладка, и кнопка «назад»
+        if !openButton.waitForExistence(timeout: 10) || !openButton.isEnabled {
+            // Окно выбора помнит прошлую папку: тогда «Обзор» — и вкладка, и кнопка «назад».
+            // На чистом симуляторе оно открывается на «Недавних», где «Открыть»
+            // неактивна: папку выбираем в «Обзоре» — «На iPhone»
             app.buttons["Обзор"].firstMatch.tap()
+            let onDevice = NSPredicate(format: "(label BEGINSWITH %@ OR label BEGINSWITH %@) AND label CONTAINS %@", "На", "On", "iPhone")
+            let place = app.buttons.matching(onDevice).firstMatch.exists
+                ? app.buttons.matching(onDevice).firstMatch
+                : app.staticTexts.matching(onDevice).firstMatch
+            if !openButton.isEnabled, place.waitForExistence(timeout: 3) { place.tap() }
             XCTAssertTrue(openButton.waitForExistence(timeout: 10), "Выбор папки не открылся")
         }
         openButton.tap()

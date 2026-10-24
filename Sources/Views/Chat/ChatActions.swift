@@ -13,8 +13,8 @@ struct ChatActions {
     var choose: @MainActor (_ option: ClarifyOption) -> Void = { _ in }
     /// Скопировать значение в буфер только этого iPhone, со сроком жизни
     var copy: @MainActor (_ value: String) -> Void = { _ in }
-    /// Открыть (true) или закрыть (false) номера документов. Открытие
-    /// требует Face ID; возвращает, открыты ли номера после вызова
+    /// Открыть (true) или закрыть (false) номера документов; возвращает,
+    /// открыты ли номера после вызова
     var setRevealed: @MainActor (_ revealed: Bool) async -> Bool = { _ in false }
     /// Показать лист правки поля
     var edit: @MainActor (_ document: ChatDocument, _ field: DocumentField) -> Void = { _, _ in }
@@ -26,7 +26,7 @@ struct ChatActions {
 
 extension EnvironmentValues {
     @Entry var chatActions = ChatActions()
-    /// Номера документов открыты после Face ID
+    /// Номера документов открыты касанием «глаза»
     @Entry var chatRevealsSensitive = false
 }
 
@@ -69,6 +69,10 @@ struct ChatCardView: View {
             FileProposalCardView(proposal: proposal)
         case .attachment(let id):
             ChatAttachmentCardView(id: id)
+        case .fact(let card, let highlighted):
+            FactCardView(card: card, highlighted: highlighted)
+        case .factProposal(let draft):
+            FactProposalCardView(draft: draft)
         }
     }
 }

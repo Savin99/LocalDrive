@@ -1107,18 +1107,26 @@ struct FolderDetailView: View {
         return list + more
     }
 
+    /// Галерея отдаёт файлы, а не данные в памяти: недокачанный из iCloud
+    /// оригинал и большое видео больше не пропадают молча
     private func importPickedPhotos(_ items: [PhotosPickerItem]) {
         isImporting = true
         Task {
-            for item in items {
-                guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
-                let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
-                let stamp = Self.nameFormatter.string(from: Date())
-                store.importData(data, preferredName: "Фото \(stamp).\(ext)", to: folder)
-            }
+            let picked = await PickedMediaFile.load(items)
+            let result = await store.importFiles(picked.files, to: folder)
+            PickedMediaFile.cleanUp(picked.files)
             photoItems = []
             isImporting = false
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            let failed = picked.failed + result.failed.count
+            if failed == 0 {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } else {
+                failure = Failure(
+                    title: failed == items.count ? "Фото не добавлены" : "Добавлено не всё",
+                    message: "Не удалось получить \(pluralize(failed, "файл", "файла", "файлов")) из галереи. Если оригинал хранится в iCloud, проверьте интернет и попробуйте ещё раз."
+                )
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
         }
     }
 

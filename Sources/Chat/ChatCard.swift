@@ -30,12 +30,16 @@ enum ChatCard: Hashable, Sendable {
     case proposal(FileProposal)
     /// Вложение чата — файл, брошенный в переписку
     case attachment(id: String)
+    /// Карточка из «Карточек»; `items` — поля, о которых спросили
+    case fact(id: UUID, items: [UUID])
+    /// Черновик карточки: в «Карточки» попадает по «Сохранить»
+    case factProposal(FactCard)
 
     var documentIDs: [Int64] {
         switch self {
         case .fields(let id, _), .document(let id), .snippet(let id, _), .expiry(let id): [id]
         case .fileList(let ids): ids
-        case .clarify, .proposal, .attachment: []
+        case .clarify, .proposal, .attachment, .fact, .factProposal: []
         }
     }
 }
@@ -77,17 +81,21 @@ struct ClarifyOption: Hashable, Codable, Sendable {
 struct ChatReply: Hashable, Sendable {
     var text: String
     var cards: [ChatCard]
+    /// Правила точно знают ответ: человек и поле, вид документа, уточнение к
+    /// прошлому ответу. Такой ответ показывается сразу — ни модель, ни облако
+    /// не спрашиваются
+    var isConfident = false
 }
 
 // MARK: - JSON
 
 extension ChatCard: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, documentId, documentIds, keys, page, question, options, proposal, attachmentId
+        case type, documentId, documentIds, keys, page, question, options, proposal, attachmentId, factId, itemIds, fact
     }
 
     private enum Kind: String, Codable {
-        case fields, document, fileList, snippet, clarify, expiry, proposal, attachment
+        case fields, document, fileList, snippet, clarify, expiry, proposal, attachment, fact, factProposal
     }
 
     /// Идентификатор в JSON — «d42», как в спецификации
@@ -127,6 +135,11 @@ extension ChatCard: Codable {
             self = .proposal(try container.decode(FileProposal.self, forKey: .proposal))
         case .attachment:
             self = .attachment(id: try container.decode(String.self, forKey: .attachmentId))
+        case .fact:
+            self = .fact(id: try container.decode(UUID.self, forKey: .factId),
+                         items: try container.decodeIfPresent([UUID].self, forKey: .itemIds) ?? [])
+        case .factProposal:
+            self = .factProposal(try container.decode(FactCard.self, forKey: .fact))
         }
     }
 
@@ -160,6 +173,13 @@ extension ChatCard: Codable {
         case .attachment(let id):
             try container.encode(Kind.attachment, forKey: .type)
             try container.encode(id, forKey: .attachmentId)
+        case .fact(let id, let items):
+            try container.encode(Kind.fact, forKey: .type)
+            try container.encode(id, forKey: .factId)
+            try container.encode(items, forKey: .itemIds)
+        case .factProposal(let card):
+            try container.encode(Kind.factProposal, forKey: .type)
+            try container.encode(card, forKey: .fact)
         }
     }
 }

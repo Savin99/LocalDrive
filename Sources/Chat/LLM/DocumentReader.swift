@@ -202,6 +202,10 @@ actor LocalDocumentReader: DocumentReading {
         }
 
         let startedEpoch = epoch
+        // Человек переписывается с чатом — его модель не вытесняем. Пока ждали,
+        // приложение могло уйти в фон
+        try await ModelResidency.shared.waitForChatPause()
+        guard epoch == startedEpoch else { throw CancellationError() }
         // Одна модель в памяти: модель чата выгружается до загрузки этой
         await ModelResidency.shared.acquire(ObjectIdentifier(self)) { [weak self] in
             await self?.suspend()

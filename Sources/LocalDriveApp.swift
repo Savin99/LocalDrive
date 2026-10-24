@@ -4,8 +4,6 @@ import SwiftUI
 struct LocalDriveApp: App {
     @State private var store: VaultStore
     @State private var facts: FactStore
-    /// Подтверждение владельца перед показом номера в чате
-    @State private var lock = LockManager()
     @State private var hiddenFolders = HiddenFolders()
     @State private var backup: BackupManager
     @State private var search: SearchService
@@ -34,7 +32,6 @@ struct LocalDriveApp: App {
             RootView()
                 .environment(store)
                 .environment(facts)
-                .environment(lock)
                 .environment(hiddenFolders)
                 .environment(backup)
                 .environment(search)
@@ -45,7 +42,7 @@ struct LocalDriveApp: App {
                     switch newPhase {
                     case .background:
                         // Уход в фон снова прячет скрытые папки, а номера
-                        // в переписке — под маску до нового Face ID
+                        // в переписке — снова под маску
                         hiddenFolders.hide()
                         chat.revealsSensitive = false
                         // База индекса защищена как файлы: на заблокированном

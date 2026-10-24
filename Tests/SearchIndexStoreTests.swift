@@ -136,4 +136,57 @@ final class SearchIndexStoreTests: XCTestCase {
         XCTAssertEqual(try found("img"), [])
         XCTAssertEqual(try found("антиплагиат"), ["Справка РУДН.jpg"])
     }
+
+    // MARK: - Смена модели (24.10.2026)
+
+    /// Владелец сменил модель распознавания — и приложение перечитало всё. Теперь
+    /// прочитанное любой моделью той же версии схемы заново не отправляется;
+    /// новая модель берёт новое и то, что прежней не далось; «Перечитать» — всё
+    func testCloudModelChangeDoesNotRereadReadDocuments() throws {
+        let read = try index.save(record("паспорт.jpg", in: folder, text: "паспорт"), indexVersion: 3)
+        let failed = try index.save(record("скан.jpg", in: folder, text: "скан"), indexVersion: 3)
+        let skipped = try index.save(record("договор.pdf", in: folder, text: "договор"), indexVersion: 3)
+        let fresh = try index.save(record("новый.jpg", in: folder, text: "новый"), indexVersion: 3)
+        let old = try index.save(record("старый.jpg", in: folder, text: "старый"), indexVersion: 3)
+        let sol = "cloud3:openai:gpt-6.1-sol"
+        let luna = "cloud3:openai:gpt-6-luna"
+        try index.markCloud(documentID: read, mark: sol)
+        try index.markCloud(documentID: failed, mark: SearchIndexStore.CloudMark.failed(sol))
+        try index.markCloud(documentID: skipped, mark: SearchIndexStore.CloudMark.skipped(sol))
+        try index.markCloud(documentID: old, mark: "cloud2:openai:gpt-6.1-sol")
+
+        let candidates = try index.cloudCandidates(mark: luna, folders: [folder]).map(\.documentID)
+        XCTAssertEqual(Set(candidates), [failed, fresh, old], "прочитанное другой моделью отправилось бы заново")
+        XCTAssertEqual(try index.cloudCounts(mark: luna, folders: [folder]).read, 1)
+
+        // Не далось и этой — больше не пробует
+        try index.markCloud(documentID: failed, mark: SearchIndexStore.CloudMark.failed(luna))
+        XCTAssertFalse(try index.cloudCandidates(mark: luna, folders: [folder]).map(\.documentID).contains(failed))
+
+        try index.resetCloudMarks(folders: [folder])
+        XCTAssertEqual(try index.cloudCandidates(mark: luna, folders: [folder]).count, 5)
+    }
+
+    func testLocalModelChangeDoesNotRereadReadDocuments() throws {
+        let passport = DocumentRecord(
+            folderID: folder, fileName: "паспорт.jpg", type: .passportRU, title: "паспорт", pageCount: 1,
+            fileSize: 10, fileModified: 1_000, failed: false, chunks: [SearchIndexer.chunk(page: 1, text: "паспорт")], fields: []
+        )
+        let read = try index.save(passport, indexVersion: 3)
+        let failedRecord = DocumentRecord(
+            folderID: folder, fileName: "скан.jpg", type: .passportRU, title: "скан", pageCount: 1,
+            fileSize: 10, fileModified: 1_000, failed: false, chunks: [SearchIndexer.chunk(page: 1, text: "скан")], fields: []
+        )
+        let failed = try index.save(failedRecord, indexVersion: 3)
+        try index.markModelRead(documentID: read, revision: "model-4b")
+        try index.markModelRead(documentID: failed, revision: SearchIndexStore.ModelMark.failed("model-4b"))
+
+        let candidates = try index.modelCandidates(types: [.passportRU], revision: "model-2b", folders: [folder])
+        XCTAssertEqual(candidates.map(\.documentID), [failed])
+        XCTAssertEqual(try index.modelCounts(types: [.passportRU], revision: "model-2b", folders: [folder]).read, 1)
+        XCTAssertEqual(try index.modelState(folderID: folder, fileName: "паспорт.jpg", types: [.passportRU], revision: "model-2b"), .read)
+
+        try index.resetModelMarks(folders: [folder])
+        XCTAssertEqual(try index.modelCandidates(types: [.passportRU], revision: "model-2b", folders: [folder]).count, 2)
+    }
 }

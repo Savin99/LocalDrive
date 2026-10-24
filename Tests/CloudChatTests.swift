@@ -171,8 +171,10 @@ final class CloudChatTests: XCTestCase {
         let json = try body(0)
         XCTAssertTrue(json["system_instruction"]?["parts"]?.array?.first?["text"]?.string?.hasPrefix(CloudChatPrompt.system) == true)
         let names = Set(json["tools"]?.array?.first?["functionDeclarations"]?.array?.compactMap { $0["name"]?.string } ?? [])
+        // С 24.10.2026 — и инструменты «Карточек»
         XCTAssertEqual(names, ["search_documents", "list_documents", "list_folders", "list_files", "get_document",
-                               "view_document", "list_expiring", "show_cards", "propose_file_actions"])
+                               "view_document", "list_expiring", "show_cards", "propose_file_actions",
+                               "find_fact_cards", "show_fact_card", "propose_fact_card"])
         let thinking = json["generationConfig"]?["thinkingConfig"]
         XCTAssertEqual(thinking?["includeThoughts"]?.bool, true)
         XCTAssertEqual(thinking?["thinkingLevel"]?.string, "low", "«Авто» для простого вопроса — low, а не medium по умолчанию")
@@ -368,7 +370,8 @@ final class CloudChatTests: XCTestCase {
 
         let tools = try XCTUnwrap(json["tools"]?.array)
         XCTAssertEqual(Set(tools.compactMap { $0["name"]?.string }), ["search_documents", "list_documents", "list_folders", "list_files",
-                                                                     "get_document", "view_document", "list_expiring", "show_cards", "propose_file_actions"])
+                                                                     "get_document", "view_document", "list_expiring", "show_cards", "propose_file_actions",
+                                                                     "find_fact_cards", "show_fact_card", "propose_fact_card"])
         for tool in tools {
             XCTAssertEqual(tool["type"]?.string, "function")
             XCTAssertEqual(tool["strict"]?.bool, true)
@@ -411,8 +414,10 @@ final class CloudChatTests: XCTestCase {
         var log: [CloudChatEvent] = []
         let reply = try await engine(.luna).respond(to: "паспорт ильи") { log.append($0) }
         let card = ChatCard.fields(documentID: id, keys: ["full_name"])
+        // Шаг «Готовлю карточки» — для ленты шагов в чате, сразу перед ними
         XCTAssertEqual(log, [
             .thoughts("Ищу паспорт"), .thoughts("Ищу паспорт\n\nНашёл"),
+            .step(.open, "Готовлю карточки"),
             .cards([card]),
             .text("Вот ваш "), .text("Вот ваш паспорт."),
             .tool("show_cards"),

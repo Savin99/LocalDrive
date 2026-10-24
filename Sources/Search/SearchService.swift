@@ -42,6 +42,7 @@ final class SearchService {
         case resume
         case reader((any DocumentReading)?)
         case cloudReader((any CloudReading)?)
+        case reread(cloud: Bool)
         case barrier(CheckedContinuation<Void, Never>)
     }
 
@@ -87,6 +88,7 @@ final class SearchService {
                 case .resume: await indexer.resume()
                 case .reader(let reader): await indexer.useReader(reader)
                 case .cloudReader(let reader): await indexer.useCloudReader(reader)
+                case .reread(let cloud): await indexer.rereadAll(cloud: cloud)
                 case .barrier(let waiter): waiter.resume()
                 }
             }
@@ -127,6 +129,13 @@ final class SearchService {
     /// Подключить или отключить облачное распознавание
     func useCloudReader(_ reader: (any CloudReading)?) {
         commands.yield(.cloudReader(reader))
+    }
+
+    /// «Перечитать все документы»: смена модели прочитанное заново не
+    /// отправляет — это делает только эта кнопка. `cloud` — облако, иначе
+    /// модель на iPhone
+    func rereadAll(cloud: Bool) {
+        commands.yield(.reread(cloud: cloud))
     }
 
     /// Папки, из которых разрешено искать: поиск включён и папка не

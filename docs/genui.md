@@ -213,7 +213,7 @@ protocol GenUIDataProvider: Sendable {
 | `ask {text}` | отправить вопрос в чат, как чип | — |
 | `open_document {document_id}` | открыть файл | — |
 | `show_fields {document_id, keys}` | карточка полей из базы | — |
-| `copy_field {document_id, key}` | копировать поле; номер — после Face ID, как в карточке | — |
+| `copy_field {document_id, key}` | копировать поле, номер — целиком, без Face ID (24.10.2026) | — |
 | `open_folder {folder_id}` | перейти в папку | — |
 | `remind {document_id}` | напоминание о сроке | да |
 | `propose_file_actions {summary, actions: [{kind: save_attachment\|move_files\|rename_file\|create_folder, …}]}` | карточка-предложение файловых действий | выполняет только кнопка «Выполнить» |
@@ -368,7 +368,7 @@ xcodebuild передаёт в тест переменные с приставк
   названиях цифры длиннее трёх закрыты.
 - **Действия** (`GenUIChatPerformer`): `ask` и `submit` — сообщение в чат
   (форма — подписью и значениями «days: 10»); `open_document` — просмотр;
-  `show_fields` — карточка под ответом; `copy_field` — номер после Face ID;
+  `show_fields` — карточка под ответом; `copy_field` — номер целиком;
   `open_folder` — документы папки карточкой; `remind` — с подтверждением
   диалогом; `propose_file_actions` — карточка предложения FileProposalBuilder,
   выполняет только «Выполнить»; `regenerate` — модель перестраивает блок по

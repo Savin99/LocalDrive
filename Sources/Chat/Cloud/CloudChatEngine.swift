@@ -151,6 +151,8 @@ enum CloudChatEvent: Sendable, Equatable {
     case text(String)
     /// Модель зовёт инструмент — новый раунд ответа
     case tool(String)
+    /// Что инструмент делает — шаг для экрана: «Ищу в документах: прописка»
+    case step(ChatStep.Kind, String)
     /// Карточки show_cards — показать сразу, до текста
     case cards([ChatCard])
     /// Ответ интерфейсом: очередной кусок JSON как есть, без маски — маска
@@ -183,7 +185,7 @@ final class CloudChatEngine {
     static let maxRounds = 6
     /// Инструменты, после которых ответ готов: карточки и предложение показаны,
     /// лишний раунд за финальным текстом не нужен
-    static let terminalTools: Set<String> = ["show_cards", "propose_file_actions"]
+    static let terminalTools: Set<String> = ["show_cards", "propose_file_actions", "show_fact_card", "propose_fact_card"]
 
     /// Опись документов для системной инструкции: id, вид, название, владелец,
     /// папка — без номеров. Стабильный префикс запроса: на нём работает кэш
@@ -204,6 +206,13 @@ final class CloudChatEngine {
     var configuration: Configuration
     private let session: URLSession
     private let tools: CloudChatTools
+    /// Для шагов на экране: название документа по id из аргументов
+    private let search: SearchService
+    /// «Карточки»: их опись — в инструкции, работа с ними — инструментами
+    var facts: FactStore? {
+        get { tools.facts }
+        set { tools.facts = newValue }
+    }
     /// Прошлые ходы разговора в формате сервиса — только в памяти
     private(set) var history: [CloudJSON] = []
     /// Чьей модели история: у другого сервиса другой формат, у другой модели
@@ -216,6 +225,7 @@ final class CloudChatEngine {
     init(configuration: Configuration, search: SearchService, proposals: FileProposalMaker? = nil, session: URLSession = .shared) {
         self.configuration = configuration
         self.session = session
+        self.search = search
         tools = CloudChatTools(search: search, proposals: proposals)
     }
 
@@ -325,7 +335,8 @@ final class CloudChatEngine {
             let request = {
                 var options = self.options
                 options.fastTier = options.fastTier && self.fastTier
-                return dialect.request(history: items, system: Self.system(self.documentIndex, genUI: genUI && self.options.genUI, owner: self.ownerName),
+                return dialect.request(history: items, system: Self.system(self.documentIndex, genUI: genUI && self.options.genUI, owner: self.ownerName,
+                                                                         facts: CloudChatFactTools.index(self.facts)),
                                        configuration: self.configuration, level: level, state: state, options: options,
                                        genUI: genUI && self.options.genUI)
             }
@@ -344,6 +355,7 @@ final class CloudChatEngine {
                 let index = seen
                 seen += 1
                 guard call.name == "show_cards" else { return }
+                await self.announce(call, onEvent: onEvent)
                 await self.run(call, index: index, round: round, onEvent: onEvent)
                 if !round.cards.isEmpty {
                     visible()
@@ -358,6 +370,7 @@ final class CloudChatEngine {
             for (index, call) in turn.calls.enumerated() {
                 onEvent(.tool(call.name))
                 if round.early[index] == nil {
+                    await announce(call, onEvent: onEvent)
                     await run(call, index: index, round: round, onEvent: onEvent)
                     if !round.cards.isEmpty {
                         visible()
@@ -377,6 +390,12 @@ final class CloudChatEngine {
         return finish(round.answer.isEmpty ? "Не успел собрать ответ — уточните вопрос." : round.answer)
     }
 
+    /// Шаг на экране — до того, как инструмент начнёт работу
+    private func announce(_ call: CloudChatCall, onEvent: @MainActor (CloudChatEvent) -> Void) async {
+        guard let (kind, text) = await CloudChatSteps.step(for: call.name, arguments: call.arguments, search: search, facts: facts) else { return }
+        onEvent(.step(kind, text))
+    }
+
     /// Инструмент и его карточки. Результат запоминается по номеру вызова в
     /// ходе: show_cards, выполненный прямо из потока, второй раз не зовётся
     private func run(_ call: CloudChatCall, index: Int, round: RoundState, onEvent: @MainActor (CloudChatEvent) -> Void) async {
@@ -389,12 +408,15 @@ final class CloudChatEngine {
         if shown { onEvent(.cards(Array(cards[before...]))) }
     }
 
-    static func system(_ index: String, genUI: Bool = false, owner: String? = nil) -> String {
+    /// `facts` — опись «Карточек» без значений (CloudChatFactTools.index)
+    static func system(_ index: String, genUI: Bool = false, owner: String? = nil, facts: String = "") -> String {
         // Чей «мой паспорт»: модель не угадывает владельца по документам
         let ownerLine = owner.map { "Владелец хранилища: \($0). «Мой», «моя», «мне» — о его документах." }
             ?? "Владелец хранилища неизвестен. На «мой паспорт», «мои документы» при документах нескольких людей не угадывай — спроси, чей, вариантами с именами."
-        let base = (genUI ? CloudChatGenUI.system : CloudChatPrompt.system) + "\n" + ownerLine
-        return index.isEmpty ? base : base + "\n\nДокументы хранилища (id · вид · название · владелец · папка · срок, если записан):\n" + index
+        let base = (genUI ? CloudChatGenUI.system : CloudChatPrompt.system) + "\n" + ownerLine + "\n" + CloudChatFactTools.instruction
+        var prompt = index.isEmpty ? base : base + "\n\nДокументы хранилища (id · вид · название · владелец · папка · срок, если записан):\n" + index
+        if !facts.isEmpty { prompt += "\n\nКарточки (id · название · поля):\n" + facts }
+        return prompt
     }
 
     // MARK: - Поток

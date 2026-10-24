@@ -10,6 +10,7 @@ struct CloudRecognitionSettingsView: View {
     @State private var modelDraft = ""
     @State private var urlDraft = ""
     @State private var showsAdvanced = false
+    @State private var confirmsReread = false
 
     private var cloud: CloudRecognitionStore { search.cloud }
 
@@ -122,7 +123,7 @@ struct CloudRecognitionSettingsView: View {
             }
 
             if cloud.isEnabled, cloud.hasKey {
-                Section("Ход работы") {
+                Section {
                     let progress = search.progress
                     Text("Документов: \(progress.cloudDocuments) · распознано в облаке: \(progress.cloudRead) · ждут: \(progress.cloudPending)")
                         .monospacedDigit()
@@ -130,6 +131,24 @@ struct CloudRecognitionSettingsView: View {
                     Label(Self.state(progress), systemImage: progress.cloudPaused == nil ? "cloud" : "exclamationmark.triangle.fill")
                         .foregroundStyle(progress.cloudPaused == nil ? Color.secondary : Color.orange)
                         .accessibilityIdentifier("cloudState")
+                    // Смена модели прочитанное не перечитывает — только эта кнопка
+                    Button("Перечитать все документы") { confirmsReread = true }
+                        .disabled(progress.cloudDocuments == 0)
+                        .accessibilityIdentifier("cloudReread")
+                } header: {
+                    Text("Ход работы")
+                } footer: {
+                    Text("Другая модель или сервис читают только новые документы. Прочитанные раньше остаются как есть, пока вы не нажмёте «Перечитать».")
+                }
+                .confirmationDialog(
+                    "Отправить все документы заново?",
+                    isPresented: $confirmsReread,
+                    titleVisibility: .visible
+                ) {
+                    Button("Перечитать — \(cloud.model)") { search.rereadAll(cloud: true) }
+                    Button("Отмена", role: .cancel) {}
+                } message: {
+                    Text("Документов: \(search.progress.cloudDocuments). Каждая страница — запрос к облаку и деньги на счёте.")
                 }
             }
 
@@ -139,7 +158,7 @@ struct CloudRecognitionSettingsView: View {
                     LabeledContent("Примерно", value: Self.dollars(cloud.spentDollars))
                 }
                 if let perPage = CloudRecognitionStore.estimatedPagePrice(model: cloud.model) {
-                    Text("Около \(Self.dollars(perPage)) за страницу по ценам \(cloud.provider.company) на 12.10.2026; рассуждение модели — сверху. Другая модель или сервис — документы распознаются заново.")
+                    Text("Около \(Self.dollars(perPage)) за страницу по ценам \(cloud.provider.company) на 12.10.2026; рассуждение модели — сверху. Другая модель читает только новые документы.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
