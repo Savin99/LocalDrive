@@ -306,7 +306,9 @@ final class GenUILiveEvalTests: XCTestCase {
                      "C1 «дата рождения Ольги» < 1 с", "C2 «сколько лет Ольге» < 1 с", "C3 «а у Ильи?» < 1 с",
                      "C4 «фото паспорта Ольги» < 1 с", "C5 «перенеси его в папку Ольга» < 1 с", "C6 чип «Номер паспорта» < 1 с",
                      // Сборка 16 на iPhone: «какой день рождения у этого человека» — без ответа
-                     "C7 «какой день рождения у этого человека?» < 1 с", "C8 «какой день рождения у Ильи» < 1 с"].map { Step(name: $0) }
+                     "C7 «какой день рождения у этого человека?» < 1 с", "C8 «какой день рождения у Ильи» < 1 с",
+                     // Облако само, без правил: поправка фамилии — propose_field_fix (24.10.2026)
+                     "B4 модель: фамилия с ошибкой → исправление"].map { Step(name: $0) }
         let passports = await search.documents(ofTypes: [.passportRU])
         let olga = try XCTUnwrap(passports.first { $0.fileName == "паспорт Ольги.txt" }?.id)
         func record(_ index: Int, _ passed: Bool, _ miss: String, _ started: Date) {
@@ -400,7 +402,8 @@ final class GenUILiveEvalTests: XCTestCase {
             // (B) модель без правил: тот же разговор, исправленная инструкция
             search.owner.clear()
             for (step, question, prior) in [(5, "мой паспорт", nil), (6, "дай все данные для копирования", "мой паспорт"),
-                                            (7, "регистрацию тоже", "мой паспорт")] as [(Int, String, String?)] {
+                                            (7, "регистрацию тоже", "мой паспорт"),
+                                            (16, "в фамилии ошибка, правильно Трошкина", "паспорт Ольги")] as [(Int, String, String?)] {
                 let engine = CloudChatEngine(
                     configuration: .init(provider: .openAI, baseURL: CloudProvider.openAI.defaultBaseURL, apiKey: key, model: .luna, reasoning: .auto),
                     search: search, session: .shared
@@ -409,12 +412,13 @@ final class GenUILiveEvalTests: XCTestCase {
                 engine.documentIndex = index
                 if let prior {
                     engine.ownerName = "Савин И. А."
-                    engine.record(question: prior, answer: "Показал карточки документов: d\(savin).")
+                    engine.record(question: prior, answer: "Показал карточки документов: d\(step == 16 ? olga : savin).")
                 }
                 let stream = EvalStream(engine: engine)
                 started = Date()
+                var reply: CloudChatReply?
                 do {
-                    _ = try await engine.respond(to: question) { event in
+                    reply = try await engine.respond(to: question) { event in
                         if case .answerDelta(let delta) = event { stream.feedDelta(delta) }
                         if case .tool = event { stream.newRound = true }
                     }
@@ -428,6 +432,14 @@ final class GenUILiveEvalTests: XCTestCase {
                 let blocks = stream.feed.model.blocks.flatMap(\.flattened)
                 let text = stream.feed.model.text + " " + blocks.map { "\($0.raw)" }.joined()
                 switch step {
+                case 16:
+                    let fixed = reply?.cards.contains { card in
+                        if case .fieldFix(let id, let key, let value) = card {
+                            return id == olga && key == FieldKey.fullName && value.hasPrefix("Трошкина Ольга")
+                        }
+                        return false
+                    } == true
+                    record(step, fixed, String(text.prefix(140)) + " \(reply?.cards ?? [])", started)
                 case 5:
                     let singleCard = fields(message) != nil
                     // Спросила, чей: оба человека — по фамилии или по имени

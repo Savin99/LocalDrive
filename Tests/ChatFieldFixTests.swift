@@ -80,6 +80,28 @@ final class ChatFieldFixTests: XCTestCase {
         XCTAssertNil(ChatFieldFix("паспорт Ольги"))
     }
 
+    /// Модель берёт ФИО из описи — с инициалами; в поле уходит полное
+    func testInitialsFromIndexExpandToFullName() {
+        let current = "Трошина Ольга Петровна"
+        XCTAssertEqual(ChatFieldFix.expandingInitials("Трошкина О. П.", current: current), "Трошкина Ольга Петровна")
+        XCTAssertEqual(ChatFieldFix.expandingInitials("Трошкина О.П.", current: current), "Трошкина О.П.",
+                       "слитные инициалы не угадываем — человек увидит «станет» до кнопки")
+        XCTAssertEqual(ChatFieldFix.expandingInitials("Трошкина Ольга Петровна", current: current), "Трошкина Ольга Петровна")
+        XCTAssertEqual(ChatFieldFix.expandingInitials("Трошина А. П.", current: current), "Трошина А. П.",
+                       "другая буква — это поправка имени, не инициал")
+    }
+
+    /// Ответы модели из живой проверки: правка ложится на текущее ФИО
+    func testModelNameVariantsLandOnCurrentName() {
+        let current = "Трошина Ольга Петровна"
+        XCTAssertEqual(ChatFieldFix.correctedName("Трошкина О. П.", current: current), "Трошкина Ольга Петровна")
+        XCTAssertEqual(ChatFieldFix.correctedName("Ольга Трошкина", current: current), "Трошкина Ольга Петровна")
+        XCTAssertEqual(ChatFieldFix.correctedName("Трошкина Ольга Петровна", current: current), "Трошкина Ольга Петровна")
+        XCTAssertEqual(ChatFieldFix.correctedName("Трошина Ольга Павловна", current: current), "Трошина Ольга Павловна")
+        XCTAssertEqual(ChatFieldFix.correctedName("Анна Иванова", current: current), "Анна Иванова",
+                       "два новых слова — не поправка одного, значение как есть")
+    }
+
     // MARK: - В чате
 
     func testSurnameErrorAsksThenProposesFix() async throws {

@@ -334,11 +334,16 @@ final class CloudChatTools {
             return ["error": "Нужно правильное значение целиком"]
         }
         var normalized = ChatFieldFix.isDate(key) ? (ChatFieldFix.normalizedDate(value) ?? value) : value
-        // «Трошкина» вместо ФИО целиком — это фамилия: имя и отчество остаются
-        if key == FieldKey.fullName, !normalized.contains(" "),
+        // «Трошкина» вместо ФИО целиком — это фамилия: имя и отчество остаются;
+        // «Трошкина О. П.», «Ольга Трошкина» — правка ложится на текущее ФИО
+        if key == FieldKey.fullName,
            let current = await search.fields(for: [id])[id]?.first(where: { $0.key == key })?.value {
-            let fix = ChatFieldFix(key: key, namePart: .surname, answer: normalized)
-            normalized = fix.resolvedValue(current: current) ?? normalized
+            if normalized.contains(" ") {
+                normalized = ChatFieldFix.correctedName(normalized, current: current)
+            } else {
+                let fix = ChatFieldFix(key: key, namePart: .surname, answer: normalized)
+                normalized = fix.resolvedValue(current: current) ?? normalized
+            }
         }
         cards.append(.fieldFix(documentID: id, key: key, value: normalized))
         return ["shown": true, "note": "Карточка показана. Исправит человек кнопкой."]

@@ -990,7 +990,7 @@ struct ChatRouter {
     }
 
     /// Расстояние Левенштейна
-    static func editDistance(_ a: String, _ b: String) -> Int {
+    nonisolated static func editDistance(_ a: String, _ b: String) -> Int {
         let a = Array(a), b = Array(b)
         guard !a.isEmpty else { return b.count }
         guard !b.isEmpty else { return a.count }

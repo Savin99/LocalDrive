@@ -114,6 +114,47 @@ struct ChatFieldFix: Equatable {
         return parts.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
+    /// «Трошкина О. П.» при ФИО «Трошина Ольга Петровна» → «Трошкина Ольга
+    /// Петровна»: инициалы, взятые моделью из описи, заменяются словами
+    /// текущего ФИО с той же буквы. Живая проверка OpenAI 24.10.2026: 2 из 3
+    /// предложений пришли с инициалами
+    static func expandingInitials(_ value: String, current: String) -> String {
+        let words = value.split(separator: " ").map(String.init)
+        let known = current.split(separator: " ").map(String.init)
+        guard words.count <= known.count else { return value }
+        var expanded = words
+        for (index, word) in words.enumerated() {
+            let letters = word.filter { $0 != "." }
+            guard letters.count == 1, word.count <= 2, let letter = letters.first else { continue }
+            // Инициал не той буквы — значит, имя и правда другое: не раскрываем
+            // ничего, чтобы не вышло «Трошина А. Петровна»
+            guard known[index].lowercased().first == Character(letter.lowercased()) else { return value }
+            expanded[index] = known[index]
+        }
+        return expanded.joined(separator: " ")
+    }
+
+    /// ФИО от модели → новое значение поля. «Трошкина О. П.» — инициалы
+    /// раскрываются; «Ольга Трошкина» при «Трошина Ольга Петровна» — одно новое
+    /// слово заменяет самое похожее слово текущего ФИО, порядок и отчество
+    /// остаются (живая проверка OpenAI 24.10.2026). Новое слово ни на что не
+    /// похоже или новых слов несколько — значение как есть: человек видит
+    /// «станет» до кнопки
+    static func correctedName(_ value: String, current: String) -> String {
+        let value = expandingInitials(value, current: current)
+        let words = value.split(separator: " ").map(String.init)
+        var known = current.split(separator: " ").map(String.init)
+        let fresh = words.filter { word in !known.contains { $0.caseInsensitiveCompare(word) == .orderedSame } }
+        guard words.count < known.count || words.map({ $0.lowercased() }) != known.map({ $0.lowercased() }),
+              fresh.count == 1, let word = fresh.first else { return value }
+        let rest = known.indices.filter { index in !words.contains { $0.caseInsensitiveCompare(known[index]) == .orderedSame } }
+        let distances = rest.map { ($0, ChatRouter.editDistance(word.lowercased(), known[$0].lowercased())) }
+        guard let (index, distance) = distances.min(by: { $0.1 < $1.1 }),
+              distance <= max(2, known[index].count / 3) else { return value }
+        known[index] = word
+        return known.joined(separator: " ")
+    }
+
     static func isDate(_ key: String) -> Bool {
         [FieldKey.birthDate, FieldKey.issueDate, FieldKey.expiryDate, FieldKey.registrationDate].contains(key)
     }
