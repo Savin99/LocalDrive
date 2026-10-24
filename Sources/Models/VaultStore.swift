@@ -79,6 +79,9 @@ struct VaultFolder: Identifiable, Codable, Hashable {
     /// Выбор человека «Доступна для поиска». У суперскрытой папки он не
     /// действует: она не индексируется никогда, см. `isIndexable`
     var searchable: Bool
+    /// Папка, внутри которой лежит эта; nil — верхний уровень. Дерево живёт
+    /// только в метаданных: файлы любой папки лежат в своём `Vault/<UUID>/`
+    var parentID: UUID?
 
     init(
         id: UUID,
@@ -89,7 +92,8 @@ struct VaultFolder: Identifiable, Codable, Hashable {
         kind: VaultFolderKind = .files,
         isSuperHidden: Bool = false,
         sortOrder: FileSortOrder = .addedNewest,
-        searchable: Bool = true
+        searchable: Bool = true,
+        parentID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -100,13 +104,19 @@ struct VaultFolder: Identifiable, Codable, Hashable {
         self.isSuperHidden = isSuperHidden
         self.sortOrder = sortOrder
         self.searchable = searchable
+        self.parentID = parentID
     }
 
-    /// Попадает ли содержимое папки в индекс поиска
+    /// Собственные признаки папки без учёта родителей. Решает, видна ли папка
+    /// и попадает ли в индекс, `VaultStore.isIndexable(_:)`: вложенная
+    /// наследует скрытость и «вне поиска» от всех папок выше
     var isIndexable: Bool { searchable && !isSuperHidden }
 
+    /// Внутри ленты папок нет: её содержимое — блоки
+    var canContainSubfolders: Bool { kind == .files }
+
     private enum CodingKeys: String, CodingKey {
-        case id, name, icon, color, createdAt, kind, isSuperHidden, sortOrder, searchable
+        case id, name, icon, color, createdAt, kind, isSuperHidden, sortOrder, searchable, parentID
     }
 
     init(from decoder: Decoder) throws {
@@ -121,13 +131,16 @@ struct VaultFolder: Identifiable, Codable, Hashable {
         sortOrder = try container.decodeIfPresent(FileSortOrder.self, forKey: .sortOrder) ?? .addedNewest
         // Папки, созданные до поиска, обычными остаются доступными для него
         searchable = try container.decodeIfPresent(Bool.self, forKey: .searchable) ?? true
+        // Папки до вложенности лежат на верхнем уровне
+        parentID = try container.decodeIfPresent(UUID.self, forKey: .parentID)
     }
 }
 
 /// Изменения, которые индекс поиска отрабатывает сразу, не дожидаясь сверки:
 /// из скрытой папки текст должен исчезнуть в момент скрытия
 enum VaultChange: Equatable, Sendable {
-    /// Папку скрыли, убрали из поиска или удалили
+    /// Папку скрыли, убрали из поиска или удалили — сама или вместе с папкой
+    /// выше. Для поддерева событие приходит на каждую папку
     case folderExcluded(UUID)
     case fileRemoved(folder: UUID, name: String)
     case fileRenamed(folder: UUID, from: String, to: String)
@@ -175,6 +188,13 @@ struct FeedDocument: Codable {
         self.blocks = blocks
         self.aspects = aspects
     }
+}
+
+/// Что внутри папки: файлы (у ленты — блоки), их размер и вложенные папки
+struct FolderStats: Equatable {
+    var count: Int
+    var size: Int64
+    var subfolders: Int = 0
 }
 
 // Файл внутри папки — читается напрямую с диска
@@ -259,7 +279,30 @@ final class VaultStore {
     private func load() {
         guard let data = try? Data(contentsOf: metaURL),
               let decoded = try? JSONDecoder().decode([VaultFolder].self, from: data) else { return }
-        folders = decoded
+        folders = Self.repairedTree(decoded)
+    }
+
+    /// Родитель, которого нет, лента в роли родителя или цикл — признак
+    /// повреждённого vault.json. Такая папка встаёт на верхний уровень: иначе
+    /// до неё было бы не добраться. Цикл рвётся в одном месте — у первой его
+    /// папки по порядку, остальные остаются внутри. Файл не переписывается
+    /// до первой правки
+    static func repairedTree(_ folders: [VaultFolder]) -> [VaultFolder] {
+        var repaired = folders
+        var byID = Dictionary(folders.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for index in repaired.indices {
+            var seen: Set<UUID> = [repaired[index].id]
+            var cursor = repaired[index].parentID
+            while let id = cursor {
+                guard let parent = byID[id], parent.canContainSubfolders, seen.insert(id).inserted else {
+                    repaired[index].parentID = nil
+                    byID[repaired[index].id] = repaired[index]
+                    break
+                }
+                cursor = parent.parentID
+            }
+        }
+        return repaired
     }
 
     func reload() {
@@ -284,14 +327,21 @@ final class VaultStore {
         folders.first(where: { $0.id == id })
     }
 
+    /// Новая папка; `parentID` — внутри какой. В ленте и в несуществующей
+    /// папке вложенную не создать — тогда nil
+    @discardableResult
     func createFolder(
         name: String,
         icon: String,
         color: String,
         kind: VaultFolderKind = .files,
         isSuperHidden: Bool = false,
-        searchable: Bool = true
-    ) {
+        searchable: Bool = true,
+        parentID: UUID? = nil
+    ) -> VaultFolder? {
+        if let parentID {
+            guard let parent = folder(by: parentID), parent.canContainSubfolders else { return nil }
+        }
         let folder = VaultFolder(
             id: UUID(),
             name: name,
@@ -300,7 +350,8 @@ final class VaultStore {
             createdAt: Date(),
             kind: kind,
             isSuperHidden: isSuperHidden,
-            searchable: searchable
+            searchable: searchable,
+            parentID: parentID
         )
         try? fm.createDirectory(
             at: folderURL(folder),
@@ -310,6 +361,7 @@ final class VaultStore {
         folders.append(folder)
         save()
         revision &+= 1
+        return folder
     }
 
     /// `searchable == nil` — выбор «Доступна для поиска» не меняется
@@ -322,53 +374,183 @@ final class VaultStore {
         searchable: Bool? = nil
     ) {
         guard let idx = folders.firstIndex(where: { $0.id == id }) else { return }
-        let wasIndexable = folders[idx].isIndexable
-        folders[idx].name = name
-        folders[idx].icon = icon
-        folders[idx].color = color
-        folders[idx].isSuperHidden = isSuperHidden
-        if let searchable {
-            folders[idx].searchable = searchable
+        excludingLostFromIndex {
+            folders[idx].name = name
+            folders[idx].icon = icon
+            folders[idx].color = color
+            folders[idx].isSuperHidden = isSuperHidden
+            if let searchable {
+                folders[idx].searchable = searchable
+            }
+            save()
         }
-        save()
-        notifyIfExcluded(folders[idx], wasIndexable: wasIndexable)
         revision &+= 1
     }
 
     func setSuperHidden(_ isSuperHidden: Bool, for id: UUID) {
         guard let idx = folders.firstIndex(where: { $0.id == id }),
               folders[idx].isSuperHidden != isSuperHidden else { return }
-        let wasIndexable = folders[idx].isIndexable
-        folders[idx].isSuperHidden = isSuperHidden
-        save()
-        notifyIfExcluded(folders[idx], wasIndexable: wasIndexable)
+        excludingLostFromIndex {
+            folders[idx].isSuperHidden = isSuperHidden
+            save()
+        }
         revision &+= 1
     }
 
     func setSearchable(_ searchable: Bool, for id: UUID) {
         guard let idx = folders.firstIndex(where: { $0.id == id }),
               folders[idx].searchable != searchable else { return }
-        let wasIndexable = folders[idx].isIndexable
-        folders[idx].searchable = searchable
-        save()
-        notifyIfExcluded(folders[idx], wasIndexable: wasIndexable)
+        excludingLostFromIndex {
+            folders[idx].searchable = searchable
+            save()
+        }
         revision &+= 1
     }
 
-    /// Папка только что ушла из поиска — индекс стирает её данные немедленно
-    private func notifyIfExcluded(_ folder: VaultFolder, wasIndexable: Bool) {
-        if wasIndexable && !folder.isIndexable {
+    /// Правка признаков или дерева. Всё, что после неё ушло из поиска, — сама
+    /// папка и всё её поддерево — индекс стирает немедленно. Вернувшееся в
+    /// поиск подхватит сверка по ревизии
+    private func excludingLostFromIndex(_ change: () -> Void) {
+        let before = Set(folders.filter(isIndexable).map(\.id))
+        change()
+        let after = Set(folders.filter(isIndexable).map(\.id))
+        for folder in folders where before.contains(folder.id) && !after.contains(folder.id) {
             onChange?(.folderExcluded(folder.id))
         }
     }
 
+    /// Папка вместе со всем поддеревом и файлами. Индекс узнаёт о каждой
+    /// удалённой папке, как при удалении одной
     func deleteFolder(_ folder: VaultFolder) {
-        try? fm.removeItem(at: folderURL(folder))
-        feedCache[folder.id] = nil
-        folders.removeAll { $0.id == folder.id }
+        let doomed = [folder.id] + descendants(of: folder.id).map(\.id)
+        for id in doomed {
+            try? fm.removeItem(at: root.appendingPathComponent(id.uuidString, isDirectory: true))
+            feedCache[id] = nil
+        }
+        let removed = Set(doomed)
+        folders.removeAll { removed.contains($0.id) }
         save()
-        onChange?(.folderExcluded(folder.id))
+        for id in doomed {
+            onChange?(.folderExcluded(id))
+        }
         revision &+= 1
+    }
+
+    // MARK: - Дерево папок
+
+    /// Папки верхнего уровня — то, что видно на экране «Файлы»
+    var rootFolders: [VaultFolder] {
+        children(of: nil)
+    }
+
+    /// Вложенные папки в порядке создания; nil — верхний уровень
+    func children(of parentID: UUID?) -> [VaultFolder] {
+        folders.filter { $0.parentID == parentID }
+    }
+
+    /// Всё поддерево папки, в глубину: сначала дочерняя, затем её содержимое
+    func descendants(of id: UUID) -> [VaultFolder] {
+        var result: [VaultFolder] = []
+        var seen: Set<UUID> = [id]
+        func walk(_ parent: UUID) {
+            for child in children(of: parent) where seen.insert(child.id).inserted {
+                result.append(child)
+                walk(child.id)
+            }
+        }
+        walk(id)
+        return result
+    }
+
+    /// Папки выше этой — от верхнего уровня до родителя. Цикл в метаданных
+    /// обрывается, а не зацикливает
+    func ancestors(of folder: VaultFolder) -> [VaultFolder] {
+        var chain: [VaultFolder] = []
+        var seen: Set<UUID> = [folder.id]
+        var cursor = folder.parentID
+        while let id = cursor, seen.insert(id).inserted, let parent = self.folder(by: id) {
+            chain.append(parent)
+            cursor = parent.parentID
+        }
+        return chain.reversed()
+    }
+
+    /// Путь от верхнего уровня до самой папки включительно
+    func lineage(of folder: VaultFolder) -> [VaultFolder] {
+        ancestors(of: folder) + [folder]
+    }
+
+    /// «Документы / Паспорта» — там, где папка названа одна, без экрана вокруг
+    func path(of folder: VaultFolder, separator: String = " / ") -> String {
+        lineage(of: folder).map(\.name).joined(separator: separator)
+    }
+
+    /// Лежит ли `id` где-то внутри `ancestorID`
+    func isDescendant(_ id: UUID, of ancestorID: UUID) -> Bool {
+        guard let folder = folder(by: id) else { return false }
+        return ancestors(of: folder).contains { $0.id == ancestorID }
+    }
+
+    /// Скрыта ли папка на деле: суперскрытая сама или лежит в суперскрытой.
+    /// Суперскрытая папка прячет всё своё поддерево
+    func isHidden(_ folder: VaultFolder) -> Bool {
+        lineage(of: folder).contains(where: \.isSuperHidden)
+    }
+
+    /// Попадает ли папка в индекс на деле: она и все папки выше доступны для
+    /// поиска и ни одна не суперскрытая
+    func isIndexable(_ folder: VaultFolder) -> Bool {
+        lineage(of: folder).allSatisfy(\.isIndexable)
+    }
+
+    /// Дерево для листа выбора: папка и её глубина, в порядке обхода.
+    /// `includingHidden == false` — суперскрытая папка не попадает вместе со
+    /// всем, что внутри
+    func tree(includingHidden: Bool = false) -> [(folder: VaultFolder, depth: Int)] {
+        var result: [(folder: VaultFolder, depth: Int)] = []
+        var seen: Set<UUID> = []
+        func walk(_ parent: UUID?, depth: Int) {
+            for child in children(of: parent) where seen.insert(child.id).inserted {
+                if !includingHidden && child.isSuperHidden { continue }
+                result.append((child, depth))
+                walk(child.id, depth: depth + 1)
+            }
+        }
+        walk(nil, depth: 0)
+        return result
+    }
+
+    /// Можно ли переложить папку: не в себя, не в своё поддерево, не в ленту
+    /// и не туда, где она уже лежит
+    func canMoveFolder(_ id: UUID, to parentID: UUID?) -> Bool {
+        guard let folder = folder(by: id), folder.parentID != parentID else { return false }
+        guard let parentID else { return true }
+        guard parentID != id, let parent = self.folder(by: parentID), parent.canContainSubfolders else { return false }
+        return !isDescendant(parentID, of: id)
+    }
+
+    /// Переложить папку со всем поддеревом в другую или на верхний уровень.
+    /// Файлы остаются в своих каталогах: меняется только родитель. Если
+    /// поддерево попало в скрытую папку или в папку вне поиска, индекс
+    /// стирает его сразу
+    @discardableResult
+    func moveFolder(_ id: UUID, to parentID: UUID?) -> Bool {
+        guard canMoveFolder(id, to: parentID),
+              let idx = folders.firstIndex(where: { $0.id == id }) else { return false }
+        excludingLostFromIndex {
+            folders[idx].parentID = parentID
+            save()
+        }
+        revision &+= 1
+        return true
+    }
+
+    /// Сколько уйдёт вместе с папкой: файлы на диске (у ленты — тоже) и
+    /// вложенные папки всего поддерева
+    func subtreeContents(of folder: VaultFolder) -> (files: Int, folders: Int) {
+        let inner = descendants(of: folder.id)
+        let files = ([folder] + inner).reduce(0) { $0 + self.files(in: $1).count }
+        return (files, inner.count)
     }
 
     // MARK: - Файлы
@@ -495,10 +677,14 @@ final class VaultStore {
         revision &+= 1
     }
 
-    func stats(for folder: VaultFolder) -> (count: Int, size: Int64) {
+    /// Что внутри папки для карточки и строки: файлы (у ленты — блоки), их
+    /// размер и вложенные папки. Суперскрытые вложенные считаются, только
+    /// когда их показывают: число не должно выдавать, что они есть
+    func stats(for folder: VaultFolder, includingHidden: Bool = false) -> FolderStats {
         let items = files(in: folder)
         let count = folder.kind == .feed ? feedBlocks(in: folder).count : items.count
-        return (count, items.reduce(0) { $0 + $1.size })
+        let subfolders = children(of: folder.id).filter { includingHidden || !$0.isSuperHidden }.count
+        return FolderStats(count: count, size: items.reduce(0) { $0 + $1.size }, subfolders: subfolders)
     }
 
     /// Последние файлы папки — для коллажа на её карточке
@@ -507,9 +693,10 @@ final class VaultStore {
     }
 
     /// Недавно добавленное по всем папкам
+    /// Папка внутри суперскрытой скрыта вместе с ней
     func recentFiles(limit: Int = 10, includingSuperHidden: Bool = false) -> [(file: VaultFile, folder: VaultFolder)] {
         folders
-            .filter { includingSuperHidden || !$0.isSuperHidden }
+            .filter { includingSuperHidden || !isHidden($0) }
             .flatMap { folder in files(in: folder).map { (file: $0, folder: folder) } }
             .sorted { $0.file.addedAt > $1.file.addedAt }
             .prefix(limit)
@@ -1399,10 +1586,15 @@ extension VaultStore {
         return stored
     }
 
-    /// Новая обычная папка, доступная для поиска, — и сама она в ответ
+    /// Новая обычная папка, доступная для поиска, — и сама она в ответ.
+    /// `parentID` — внутри какой; в ленте или пропавшей папке — nil
     @discardableResult
-    func addFolder(named name: String, icon: String = "folder.fill", color: String = "indigo") -> VaultFolder {
-        createFolder(name: name, icon: icon, color: color)
-        return folders[folders.count - 1]
+    func addFolder(
+        named name: String,
+        icon: String = "folder.fill",
+        color: String = "indigo",
+        parentID: UUID? = nil
+    ) -> VaultFolder? {
+        createFolder(name: name, icon: icon, color: color, parentID: parentID)
     }
 }

@@ -72,7 +72,7 @@ struct GenUIIndexDataProvider: GenUIDataProvider {
                 type: document.type,
                 category: category,
                 folderID: folder.id,
-                folder: folder.name,
+                folder: search.path(of: folder),
                 owner: owner.isEmpty ? "" : ChatRouter.shortName(owner),
                 ownerFull: owner,
                 documentDate: DocumentReadingMerge.date(meta?.documentDate).map { GenUIDay(date: $0, calendar: Self.calendar) },

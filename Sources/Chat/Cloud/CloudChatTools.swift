@@ -118,9 +118,18 @@ final class CloudChatTools {
         return ["documents": .array(documents)]
     }
 
+    /// Папки с деревом: `parent_id` — внутри какой лежит, `path` — путь от
+    /// верхнего уровня. Родитель папки, доступной для поиска, тоже доступен:
+    /// скрытая папка выше в путь не попадает, её поддерево модели не видно
     private func listFolders() -> CloudJSON {
         let folders: [CloudJSON] = search.searchableFolders.map { folder in
-            ["id": .string(folder.id.uuidString), "name": .string(folder.name), "files": .number(Double(search.files(in: folder).count))]
+            [
+                "id": .string(folder.id.uuidString),
+                "name": .string(folder.name),
+                "parent_id": folder.parentID.map { CloudJSON.string($0.uuidString) } ?? CloudJSON.null,
+                "path": .string(search.path(of: folder)),
+                "files": .number(Double(search.files(in: folder).count)),
+            ]
         }
         return ["folders": .array(folders)]
     }
@@ -134,7 +143,7 @@ final class CloudChatTools {
             ["name": .string(file.name), "size": .number(Double(file.size)),
              "added": .string(ISO8601DateFormatter().string(from: file.addedAt))]
         }
-        return ["folder": .string(folder.name), "files": .array(files)]
+        return ["folder": .string(search.path(of: folder)), "files": .array(files)]
     }
 
     private func getDocument(_ arguments: CloudJSON) async -> CloudJSON {
@@ -223,7 +232,7 @@ final class CloudChatTools {
             "title": .string(title),
             "type": .string(type.rawValue),
             "folder_id": .string(folder.id.uuidString),
-            "folder": .string(folder.name),
+            "folder": .string(search.path(of: folder)),
         ]
         if !owner.isEmpty { summary["owner"] = .string(owner) }
         return summary
@@ -389,7 +398,7 @@ enum CloudChatPrompt {
         ],
         [
             "name": "list_folders",
-            "description": "Папки хранилища: id, название, сколько файлов.",
+            "description": "Папки хранилища: id, название, parent_id (внутри какой папки лежит, null — верхний уровень), path (путь «Документы / Паспорта»), сколько файлов.",
             "parameters": ["type": "object", "properties": [:]],
         ],
         [
@@ -482,6 +491,10 @@ enum CloudChatPrompt {
                                 "attachment_id": ["type": "string"],
                                 "folder_id": ["type": "string"],
                                 "new_folder_name": ["type": "string"],
+                                "parent_folder_id": [
+                                    "type": "string",
+                                    "description": "Для create_folder и new_folder_name: id папки, внутри которой создать новую; без него — на верхнем уровне",
+                                ],
                                 "name": ["type": "string"],
                                 "new_name": ["type": "string"],
                                 "file": [

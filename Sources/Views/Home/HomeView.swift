@@ -10,6 +10,7 @@ struct HomeView: View {
     @State private var isCreating = false
     @State private var showsSettings = false
     @State private var folderPendingDelete: VaultFolder?
+    @State private var movingFolder: VaultFolder?
     @State private var recentPreview: VaultFile?
     @State private var areHiddenFoldersRevealed = false
     @State private var zGesturePoints: [CGPoint] = []
@@ -38,8 +39,9 @@ struct HomeView: View {
         GridItem(.flexible(), spacing: 16),
     ]
 
+    /// Только верхний уровень: вложенные папки — внутри своих
     private var visibleFolders: [VaultFolder] {
-        store.folders.filter { areHiddenFoldersRevealed || !$0.isSuperHidden }
+        store.rootFolders.filter { areHiddenFoldersRevealed || !$0.isSuperHidden }
     }
 
     var body: some View {
@@ -118,6 +120,11 @@ struct HomeView: View {
                 .sheet(item: $editingFolder) { folder in
                     FolderEditorView(folder: folder)
                 }
+                .sheet(item: $movingFolder) { folder in
+                    FolderMoveSheet(folder: folder) { parentID in
+                        moveFolder(folder, to: parentID)
+                    }
+                }
                 .sheet(isPresented: $showsSettings) {
                     SettingsView()
                 }
@@ -138,22 +145,28 @@ struct HomeView: View {
                         .ignoresSafeArea()
                 }
                 .confirmationDialog(
-                    "Удалить папку «\(folderPendingDelete?.name ?? "")»?",
+                    FolderDeletion.title(for: folderPendingDelete),
                     isPresented: Binding(
                         get: { folderPendingDelete != nil },
                         set: { if !$0 { folderPendingDelete = nil } }
                     ),
-                    titleVisibility: .visible
-                ) {
-                    Button("Удалить вместе с файлами", role: .destructive) {
-                        if let folder = folderPendingDelete {
-                            withAnimation { store.deleteFolder(folder) }
-                        }
+                    titleVisibility: .visible,
+                    presenting: folderPendingDelete
+                ) { folder in
+                    Button(FolderDeletion.confirmTitle, role: .destructive) {
+                        withAnimation { store.deleteFolder(folder) }
                         folderPendingDelete = nil
                     }
                     Button("Отмена", role: .cancel) { folderPendingDelete = nil }
+                } message: { folder in
+                    Text(FolderDeletion.message(for: folder, in: store))
                 }
             }
+            // Вложенные экраны открывают папки глубже и возвращаются крошками
+            // через этот путь; им же нужно знать, открыты ли скрытые папки
+            .environment(\.folderPath, $path)
+            .environment(\.revealsHiddenFolders, areHiddenFoldersRevealed)
+            .environment(\.folderZoomNamespace, zoomNamespace)
         }
         .preference(key: FilesNavigationDepthKey.self, value: path.count)
         .sensoryFeedback(.success, trigger: areHiddenFoldersRevealed)
@@ -192,18 +205,12 @@ struct HomeView: View {
                             NavigationLink(value: folder.id) {
                                 FolderCard(
                                     folder: folder,
-                                    stats: store.stats(for: folder),
+                                    stats: store.stats(for: folder, includingHidden: areHiddenFoldersRevealed),
                                     preview: store.previewFiles(in: folder)
                                 )
                                 .overlay(alignment: .topTrailing) {
                                     if folder.isSuperHidden {
-                                        Image(systemName: "eye.slash.fill")
-                                            .font(.caption.weight(.bold))
-                                            .foregroundStyle(.white)
-                                            .padding(8)
-                                            .background(.black.opacity(0.52), in: Circle())
-                                            .padding(8)
-                                            .accessibilityLabel("Суперскрытая папка")
+                                        HiddenFolderBadge()
                                     }
                                 }
                             }
@@ -216,6 +223,11 @@ struct HomeView: View {
                                     editingFolder = folder
                                 } label: {
                                     Label("Изменить папку", systemImage: "pencil")
+                                }
+                                Button {
+                                    movingFolder = folder
+                                } label: {
+                                    Label("Переместить…", systemImage: "folder.badge.gearshape")
                                 }
                                 Button {
                                     toggleVisibility(of: folder)
@@ -272,6 +284,13 @@ struct HomeView: View {
         } else {
             showToast(hides ? "Папка скрыта" : "Папка снова на главном")
         }
+    }
+
+    /// Папка ушла внутрь другой и с главного экрана пропадает — это и есть
+    /// ответ. Тост главного экрана занят скрытыми папками, поэтому только отклик
+    private func moveFolder(_ folder: VaultFolder, to parentID: UUID?) {
+        guard withAnimation(.snappy(duration: 0.25), { store.moveFolder(folder.id, to: parentID) }) else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
     private func showToast(_ text: String) {

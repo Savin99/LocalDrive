@@ -2,7 +2,7 @@ import SwiftUI
 
 struct FolderCard: View {
     let folder: VaultFolder
-    let stats: (count: Int, size: Int64)
+    let stats: FolderStats
     /// До четырёх последних файлов — из них собирается коллаж
     let preview: [VaultFile]
 
@@ -61,13 +61,18 @@ struct FolderCard: View {
     }
 
     private var subtitle: String {
-        guard stats.count > 0 else { return "Пусто" }
+        // Вложенные папки — первыми: файлов в такой папке может не быть вовсе
+        let folders = stats.subfolders > 0 ? pluralize(stats.subfolders, "папка", "папки", "папок") : nil
+        guard stats.count > 0 else { return folders ?? "Пусто" }
         let size = ByteCountFormatter.string(fromByteCount: stats.size, countStyle: .file)
         if folder.kind == .feed {
             let blocks = pluralize(stats.count, "блок", "блока", "блоков")
             return stats.size > 0 ? "\(blocks) · \(size)" : blocks
         }
-        return "\(pluralize(stats.count, "файл", "файла", "файлов")) · \(size)"
+        let files = pluralize(stats.count, "файл", "файла", "файлов")
+        // Две части с размером не влезают в карточку — размер уступает место
+        guard let folders else { return "\(files) · \(size)" }
+        return "\(folders) · \(files)"
     }
 }
 

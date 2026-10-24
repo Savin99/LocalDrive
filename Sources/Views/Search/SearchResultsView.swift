@@ -81,6 +81,8 @@ struct SearchResultsView: View {
 }
 
 struct SearchResultRow: View {
+    @Environment(VaultStore.self) private var store
+
     let result: SearchResult
 
     var body: some View {
@@ -104,9 +106,12 @@ struct SearchResultRow: View {
                     Circle()
                         .fill(Theme.color(result.folder.color))
                         .frame(width: 6, height: 6)
-                    // Файл нашёлся по названию папки — показываем, чем он совпал
-                    Text(result.folder.name)
+                    // Файл нашёлся по названию папки — показываем, чем он совпал.
+                    // Путь: в выдаче одноимённые папки из разных мест не путаются,
+                    // а папка выше у найденного всегда доступна для поиска
+                    Text(store.path(of: result.folder))
                         .lineLimit(1)
+                        .truncationMode(.head)
                         .fontWeight(result.matchedFolder ? .semibold : .regular)
                         .foregroundStyle(result.matchedFolder ? AnyShapeStyle(Theme.ink) : AnyShapeStyle(.secondary))
                     if let page = result.page {

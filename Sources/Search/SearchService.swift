@@ -129,9 +129,22 @@ final class SearchService {
         commands.yield(.cloudReader(reader))
     }
 
-    /// Папки, из которых разрешено искать: поиск включён и папка не суперскрытая
+    /// Папки, из которых разрешено искать: поиск включён и папка не
+    /// суперскрытая — у неё самой и у всех папок выше
     var searchableFolders: [VaultFolder] {
-        store.folders.filter(\.isIndexable)
+        store.folders.filter(store.isIndexable)
+    }
+
+    /// Доступна ли папка для поиска сейчас: признаки берутся из хранилища, а
+    /// не из снимка, который держит экран
+    private func isSearchable(_ folder: VaultFolder) -> Bool {
+        store.folder(by: folder.id).map(store.isIndexable) ?? false
+    }
+
+    /// «Документы / Паспорта». Путь папки, доступной для поиска, состоит
+    /// только из таких же папок: скрытая выше в него попасть не может
+    func path(of folder: VaultFolder) -> String {
+        store.path(of: folder)
     }
 
     // MARK: - Индексация
@@ -189,13 +202,13 @@ final class SearchService {
 
     /// Распознан ли файл в облаке — для «Сведений»
     func cloudState(for file: VaultFile, in folder: VaultFolder) async -> CloudReadState? {
-        guard folder.isIndexable else { return nil }
+        guard isSearchable(folder) else { return nil }
         return await indexer.cloudState(folderID: folder.id, fileName: file.name)
     }
 
     /// Прочитала ли модель для документов этот файл — для «Сведений»
     func modelState(for file: VaultFile, in folder: VaultFolder) async -> ModelReadState? {
-        guard folder.isIndexable else { return nil }
+        guard isSearchable(folder) else { return nil }
         return await indexer.modelState(folderID: folder.id, fileName: file.name)
     }
 
@@ -303,7 +316,7 @@ final class SearchService {
 
     /// Метаданные файла — для «Сведений»
     func metadata(for file: VaultFile, in folder: VaultFolder) async -> DocumentMetadata? {
-        guard folder.isIndexable else { return nil }
+        guard isSearchable(folder) else { return nil }
         return await indexer.metadata(folderID: folder.id, fileName: file.name)
     }
 
@@ -325,7 +338,7 @@ final class SearchService {
             let kind = [document.type.rawValue, meta?.kind.nilIfEmpty].compactMap { $0 }.joined(separator: "/")
             var line = [
                 ChatCard.encodeID(document.id), kind, Self.withoutNumbers(meta?.title.nilIfEmpty ?? document.fileName),
-                owner.isEmpty ? "—" : ChatRouter.shortName(owner), Self.withoutNumbers(folder.name),
+                owner.isEmpty ? "—" : ChatRouter.shortName(owner), Self.withoutNumbers(store.path(of: folder)),
             ].joined(separator: " · ")
             // Срок — только записанный в документе: «когда истекает» модель
             // отвечает текстом сразу. Срок паспорта РФ выводится из даты
@@ -371,7 +384,7 @@ final class SearchService {
 
     /// Живой файл хранилища для документа индекса
     func file(for document: StoredDocument) -> (file: VaultFile, folder: VaultFolder)? {
-        guard let folder = store.folder(by: document.folderID), folder.isIndexable,
+        guard let folder = store.folder(by: document.folderID), store.isIndexable(folder),
               let file = store.file(named: document.fileName, in: folder) else { return nil }
         return (file, folder)
     }

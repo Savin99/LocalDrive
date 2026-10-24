@@ -50,7 +50,8 @@ struct FileInfoSheet: View {
 
                 // Найдёт ли файл чат — выше дат: ради этого сведения и открывают
                 Section {
-                    LabeledContent("Папка", value: currentFolder.name)
+                    // Путь целиком: одноимённые папки бывают в разных местах
+                    LabeledContent("Папка", value: store.path(of: currentFolder))
                     LabeledContent("Поиск в чате", value: searchState.value)
                         .accessibilityIdentifier("fileInfoSearch")
                     if let metadata {
@@ -164,12 +165,18 @@ struct FileInfoSheet: View {
         return abs(date.timeIntervalSince(file.addedAt)) < 60 ? nil : date
     }
 
+    /// Скрытость и «вне поиска» наследуются от папок выше — сведения называют,
+    /// у какой папки искать переключатель
     private var searchState: (value: String, footer: String) {
-        if currentFolder.isSuperHidden {
-            return ("Нет", "Суперскрытые папки в поиск не попадают никогда.")
+        let lineage = store.lineage(of: currentFolder)
+        if store.isHidden(currentFolder) {
+            return ("Нет", "Суперскрытые папки в поиск не попадают никогда — и всё, что внутри них.")
         }
         if !currentFolder.searchable {
             return ("Выключен", "В этой папке выключено «Доступна для поиска» — включить можно в настройках папки.")
+        }
+        if let off = lineage.last(where: { !$0.searchable }) {
+            return ("Выключен", "У папки «\(off.name)» выключено «Доступна для поиска» — это действует и на всё внутри неё.")
         }
         switch isIndexed {
         case true?:
@@ -190,7 +197,7 @@ struct FileInfoSheet: View {
                 PDFDocument(url: url)?.pageCount
             }.value
         }
-        guard currentFolder.isIndexable else { return }
+        guard store.isIndexable(currentFolder) else { return }
         let key = FileKey(folderID: folder.id, name: file.name)
         isIndexed = await search.indexedFiles().contains(key)
         modelState = await search.modelState(for: file, in: currentFolder)

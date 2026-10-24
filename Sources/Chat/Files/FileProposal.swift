@@ -28,11 +28,35 @@ struct FileProposal: Identifiable, Hashable, Codable, Sendable {
     let id: UUID
     var summary: String
     var actions: [Action]
+    /// Внутри какой папки встаёт новая: имя новой папки в нижнем регистре →
+    /// родитель. Новая папка в предложении узнаётся по имени — так же, как
+    /// `FolderTarget.new`; без записи она встаёт на верхний уровень. Отдельным
+    /// полем, а не в действии: форму действий читает карточка в переписке
+    var newFolderParents: [String: UUID]
 
-    init(id: UUID = UUID(), summary: String, actions: [Action]) {
+    init(id: UUID = UUID(), summary: String, actions: [Action], newFolderParents: [String: UUID] = [:]) {
         self.id = id
         self.summary = summary
         self.actions = actions
+        self.newFolderParents = newFolderParents
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, summary, actions, newFolderParents
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        summary = try container.decode(String.self, forKey: .summary)
+        actions = try container.decode([Action].self, forKey: .actions)
+        // Предложения до вложенных папок родителей не знали
+        newFolderParents = try container.decodeIfPresent([String: UUID].self, forKey: .newFolderParents) ?? [:]
+    }
+
+    /// Родитель новой папки с этим именем; nil — верхний уровень
+    func parent(ofNewFolder name: String) -> UUID? {
+        newFolderParents[name.lowercased()]
     }
 
     /// Предложение с другой папкой для всех сохранений и переносов — «Другая папка…»
@@ -68,6 +92,8 @@ enum FileProposalError: LocalizedError, Equatable {
     case missingAttachment(String)
     case missingFolder
     case unknownFolder(String)
+    /// Внутри ленты папку не создать: её содержимое — блоки
+    case feedParent(String)
     case missingFile(String)
     case fromFeed(String)
     case emptyName
@@ -83,6 +109,7 @@ enum FileProposalError: LocalizedError, Equatable {
         case .missingAttachment(let id): "Вложения «\(id)» уже нет в чате."
         case .missingFolder: "Не указано, в какую папку положить."
         case .unknownFolder(let name): "Папка «\(name)» не найдена."
+        case .feedParent(let name): "В ленте «\(name)» нельзя создать папку."
         case .missingFile(let name): "Файла «\(name)» нет в папке."
         case .fromFeed(let name): "Из ленты «\(name)» файлы не переносятся и не переименовываются: там они часть блоков."
         case .emptyName: "Пустое имя."
@@ -100,28 +127,46 @@ enum FileProposalError: LocalizedError, Equatable {
 //     {"type": "save_attachment", "attachment_id": "a1", "folder_id": "<UUID>", "name": "Паспорт.jpg"},
 //     {"move_files": {"files": [{"folder_id": "<UUID>", "name": "скан.pdf"}], "new_folder_name": "Входящие"}},
 //     {"type": "rename_file", "file": {"folder_id": "<UUID>", "name": "IMG_1.jpg"}, "new_name": "Договор"},
-//     {"type": "create_folder", "name": "Счета"}]}
-// Папку модель называет её UUID; точное имя тоже принимается. Каждая папка и
-// каждый файл сверяются с хранилищем: модель видит только папки, доступные
-// для поиска, и сослаться на другую не может
+//     {"type": "create_folder", "name": "Счета", "parent_folder_id": "<UUID>"}]}
+// Папку модель называет её UUID; точное имя или путь «Документы / Паспорта»
+// тоже принимаются. Каждая папка и каждый файл сверяются с хранилищем: модель
+// видит только папки, доступные для поиска, и сослаться на другую не может.
+// `parent_folder_id` у create_folder и new_folder_name — внутри какой папки
+// создать новую; та тоже должна быть видна модели и не быть лентой
 enum FileProposalBuilder {
     @MainActor
     static func make(from arguments: JSONValue, store: VaultStore, inbox: ChatAttachmentInbox) throws -> FileProposal {
         guard let object = arguments.object else { throw FileProposalError.malformed }
         guard let raw = object["actions"]?.array, !raw.isEmpty else { throw FileProposalError.noActions }
-        let actions = try raw.map { try action(from: $0, store: store, inbox: inbox) }
+        var actions: [FileProposal.Action] = []
+        var parents: [String: UUID] = [:]
+        for item in raw {
+            let (action, parent) = try action(from: item, store: store, inbox: inbox)
+            actions.append(action)
+            if let parent, let name = newFolderName(in: action) { parents[name.lowercased()] = parent }
+        }
         let summary = object["summary"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let proposal = FileProposal(summary: "", actions: actions)
+        let proposal = FileProposal(summary: "", actions: actions, newFolderParents: parents)
         let text = (summary?.isEmpty == false ? summary! : describe(proposal, store: store, inbox: inbox))
-        return FileProposal(id: proposal.id, summary: String(text.prefix(300)), actions: actions)
+        return FileProposal(id: proposal.id, summary: String(text.prefix(300)), actions: actions, newFolderParents: parents)
+    }
+
+    /// Имя новой папки, которую заводит действие
+    private static func newFolderName(in action: FileProposal.Action) -> String? {
+        switch action {
+        case .createFolder(let name): name
+        case .saveAttachment(_, .new(let name), _), .moveFiles(_, .new(let name)): name
+        default: nil
+        }
     }
 
     // MARK: - Действия
 
     private static let kinds = ["save_attachment", "move_files", "rename_file", "create_folder"]
 
+    /// Действие и родитель новой папки, если действие её заводит
     @MainActor
-    private static func action(from raw: JSONValue, store: VaultStore, inbox: ChatAttachmentInbox) throws -> FileProposal.Action {
+    private static func action(from raw: JSONValue, store: VaultStore, inbox: ChatAttachmentInbox) throws -> (FileProposal.Action, UUID?) {
         guard let object = raw.object else { throw FileProposalError.malformed }
         var kind = (object["type"] ?? object["kind"] ?? object["action"])?.string
         var body = object
@@ -130,13 +175,14 @@ enum FileProposalBuilder {
             body = nested
         }
         guard let kind else { throw FileProposalError.malformed }
+        let parent = try parentFolder(body, store: store)
         switch normalized(kind) {
         case "save_attachment":
             guard let id = string(body, "attachment_id") else { throw FileProposalError.malformed }
             guard let attachment = inbox.item(id) else { throw FileProposalError.missingAttachment(id) }
-            let target = try folderTarget(body, store: store)
+            let target = try folderTarget(body, parent: parent, store: store)
             let name = try string(body, "name").map { try attachmentName($0, for: attachment) }
-            return .saveAttachment(attachmentID: id, folder: target, name: name)
+            return (.saveAttachment(attachmentID: id, folder: target, name: name), parent?.id)
 
         case "move_files":
             guard let list = (body["files"] ?? body["file"].map { JSONValue.array([$0]) })?.array, !list.isEmpty else {
@@ -147,21 +193,21 @@ enum FileProposalBuilder {
                 let ref = try fileRef(item, store: store)
                 if !refs.contains(ref) { refs.append(ref) }
             }
-            let target = try folderTarget(body, store: store)
+            let target = try folderTarget(body, parent: parent, store: store)
             if case .existing(let id) = target, refs.allSatisfy({ $0.folderID == id }) {
                 throw FileProposalError.sameFolder
             }
-            return .moveFiles(files: refs, folder: target)
+            return (.moveFiles(files: refs, folder: target), parent?.id)
 
         case "rename_file":
             guard let file = body["file"] else { throw FileProposalError.malformed }
             let ref = try fileRef(file, store: store)
             guard let raw = string(body, "new_name") else { throw FileProposalError.emptyName }
-            return .renameFile(file: ref, newName: try baseName(raw, keeping: ref.name))
+            return (.renameFile(file: ref, newName: try baseName(raw, keeping: ref.name)), nil)
 
         case "create_folder":
             guard let raw = string(body, "name") ?? string(body, "folder_name") else { throw FileProposalError.emptyName }
-            return .createFolder(name: try folderName(raw))
+            return (.createFolder(name: try folderName(raw)), parent?.id)
 
         default:
             throw FileProposalError.unknownAction(kind)
@@ -192,35 +238,57 @@ enum FileProposalBuilder {
 
     // MARK: - Папки и файлы
 
+    /// `parent` — внутри какой папки искать или заводить новую; nil — где угодно
+    /// при поиске и на верхнем уровне при создании
     @MainActor
-    static func folderTarget(_ body: [String: JSONValue], store: VaultStore) throws -> FolderTarget {
+    static func folderTarget(_ body: [String: JSONValue], parent: VaultFolder? = nil, store: VaultStore) throws -> FolderTarget {
         if let raw = string(body, "folder_id") {
             return .existing(try visibleFolder(raw, store: store).id)
         }
         if let raw = string(body, "new_folder_name") ?? string(body, "folder_name") {
             let name = try folderName(raw)
             // Папка с таким именем уже есть — кладём в неё, а не заводим двойник
-            if let existing = visibleFolder(named: name, store: store) { return .existing(existing.id) }
+            if let existing = visibleFolder(named: name, in: parent?.id, store: store) { return .existing(existing.id) }
             return .new(name: name)
         }
         throw FileProposalError.missingFolder
     }
 
-    /// Папка, о которой модели можно знать: доступна для поиска и не суперскрытая
+    /// Родитель новой папки: `parent_folder_id` (или `parent_id`). Как и любая
+    /// папка от модели — только доступная для поиска; лента папок не держит
+    @MainActor
+    private static func parentFolder(_ body: [String: JSONValue], store: VaultStore) throws -> VaultFolder? {
+        guard let raw = string(body, "parent_folder_id") ?? string(body, "parent_id") else { return nil }
+        let parent = try visibleFolder(raw, store: store)
+        guard parent.canContainSubfolders else { throw FileProposalError.feedParent(parent.name) }
+        return parent
+    }
+
+    /// Папка, о которой модели можно знать: доступна для поиска и не
+    /// суперскрытая — она сама и все папки выше
     @MainActor
     static func visibleFolder(_ raw: String, store: VaultStore) throws -> VaultFolder {
-        if let id = UUID(uuidString: raw), let folder = store.folder(by: id), folder.isIndexable {
+        if let id = UUID(uuidString: raw), let folder = store.folder(by: id), store.isIndexable(folder) {
             return folder
         }
         if let folder = visibleFolder(named: raw, store: store) { return folder }
         throw FileProposalError.unknownFolder(raw)
     }
 
+    /// Папка по имени или пути «Документы / Паспорта». Путь точнее: с ним
+    /// одноимённые папки в разных местах не путаются. `parentID` — только
+    /// среди вложенных в эту папку
     @MainActor
-    static func visibleFolder(named name: String, store: VaultStore) -> VaultFolder? {
-        store.folders.first { folder in
-            folder.isIndexable && folder.name.compare(name, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+    static func visibleFolder(named name: String, in parentID: UUID? = nil, store: VaultStore) -> VaultFolder? {
+        func same(_ lhs: String, _ rhs: String) -> Bool {
+            lhs.compare(rhs, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
         }
+        let candidates = store.folders.filter { folder in
+            store.isIndexable(folder) && (parentID == nil || folder.parentID == parentID)
+        }
+        let wanted = name.split(separator: "/").map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " / ")
+        return candidates.first { same(store.path(of: $0), wanted) }
+            ?? candidates.first { same($0.name, name) }
     }
 
     @MainActor
@@ -286,7 +354,11 @@ enum FileProposalBuilder {
             case .renameFile(let file, let newName):
                 parts.append("переименовать «\(file.name)» в «\(newName)»")
             case .createFolder(let name):
-                parts.append("создать папку «\(name)»")
+                if let parentID = proposal.parent(ofNewFolder: name), let parent = store.folder(by: parentID) {
+                    parts.append("создать папку «\(name)» в «\(store.path(of: parent))»")
+                } else {
+                    parts.append("создать папку «\(name)»")
+                }
             }
         }
         let saving = order.map { "положить \(pluralize(saves[$0] ?? 0, "файл", "файла", "файлов")) в «\($0)»" }
@@ -297,7 +369,7 @@ enum FileProposalBuilder {
     @MainActor
     static func folderTitle(_ target: FolderTarget, store: VaultStore) -> String {
         switch target {
-        case .existing(let id): store.folder(by: id)?.name ?? "папку"
+        case .existing(let id): store.folder(by: id).map { store.path(of: $0) } ?? "папку"
         case .new(let name): name
         }
     }
@@ -316,24 +388,33 @@ enum FileProposalExecutor {
         func folder(for target: FolderTarget) -> VaultFolder? {
             switch target {
             case .existing(let id):
-                guard let folder = store.folder(by: id), !folder.isSuperHidden else { return nil }
+                guard let folder = store.folder(by: id), !store.isHidden(folder) else { return nil }
                 return folder
             case .new(let name):
                 let key = name.lowercased()
                 if let folder = created[key] { return folder }
-                if let folder = FileProposalBuilder.visibleFolder(named: name, store: store) {
+                // Родитель за время до «Выполнить» мог пропасть или скрыться —
+                // тогда папку не создаём: на верхнем уровне её не ждут
+                var parent: VaultFolder?
+                if let parentID = proposal.parent(ofNewFolder: name) {
+                    guard let found = store.folder(by: parentID), !store.isHidden(found), found.canContainSubfolders else {
+                        return nil
+                    }
+                    parent = found
+                }
+                if let folder = FileProposalBuilder.visibleFolder(named: name, in: parent?.id, store: store) {
                     created[key] = folder
                     return folder
                 }
-                let folder = store.addFolder(named: name)
+                guard let folder = store.addFolder(named: name, parentID: parent?.id) else { return nil }
                 created[key] = folder
-                report.append("создал папку «\(name)»")
+                report.append("создал папку «\(store.path(of: folder))»")
                 return folder
             }
         }
 
         for case .createFolder(let name) in proposal.actions {
-            _ = folder(for: .new(name: name))
+            if folder(for: .new(name: name)) == nil { failed.append(name) }
         }
 
         // Сохранения — по папкам, чтобы отчёт был «2 файла в «Паспорта»»
@@ -352,7 +433,7 @@ enum FileProposalExecutor {
                 failed.append(attachment.name)
                 continue
             }
-            used.append((id, destination.name))
+            used.append((id, store.path(of: destination)))
             if let index = saved.firstIndex(where: { $0.folder.id == destination.id }) {
                 saved[index].count += 1
             } else {
@@ -360,7 +441,7 @@ enum FileProposalExecutor {
             }
         }
         for entry in saved {
-            report.append("сохранил \(pluralize(entry.count, "файл", "файла", "файлов")) в «\(entry.folder.name)»")
+            report.append("сохранил \(pluralize(entry.count, "файл", "файла", "файлов")) в «\(store.path(of: entry.folder))»")
         }
 
         for case .moveFiles(let refs, let target) in proposal.actions {
@@ -370,7 +451,7 @@ enum FileProposalExecutor {
             }
             var moved = 0
             for (sourceID, group) in Dictionary(grouping: refs, by: \.folderID) {
-                guard let source = store.folder(by: sourceID), !source.isSuperHidden, source.id != destination.id else {
+                guard let source = store.folder(by: sourceID), !store.isHidden(source), source.id != destination.id else {
                     failed += group.map(\.name)
                     continue
                 }
@@ -382,12 +463,12 @@ enum FileProposalExecutor {
                 failed += result.failed
             }
             if moved > 0 {
-                report.append("перенёс \(pluralize(moved, "файл", "файла", "файлов")) в «\(destination.name)»")
+                report.append("перенёс \(pluralize(moved, "файл", "файла", "файлов")) в «\(store.path(of: destination))»")
             }
         }
 
         for case .renameFile(let ref, let newName) in proposal.actions {
-            guard let source = store.folder(by: ref.folderID), !source.isSuperHidden, source.kind == .files,
+            guard let source = store.folder(by: ref.folderID), !store.isHidden(source), source.kind == .files,
                   let file = store.file(named: ref.name, in: source) else {
                 failed.append(ref.name)
                 continue

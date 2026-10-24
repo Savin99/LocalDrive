@@ -40,12 +40,12 @@
   | --- | --- |
   | `search_documents(query, types?, owner?)` | Найденные документы: id `d…`, вид, папка, владелец, выдержка, метаданные |
   | `list_documents(type?, folder_id?)` | Документы вида или папки |
-  | `list_folders()` | Папки |
+  | `list_folders()` | Папки: `id`, `name`, `parent_id` (null — верхний уровень), `path` «Документы / Паспорта», число файлов. Поддерева скрытых папок нет |
   | `list_files(folder_id)` | Файлы папки |
   | `get_document(id)` | Поля и выдержка текста документа, метаданные |
   | `list_expiring(before?)` | Что истекает: срок из метаданных и сроки паспортов |
   | `show_cards(cards)` | Карточки прежнего каталога в прежнем JSON; значения подставляет база |
-  | `propose_file_actions(actions, summary)` | Карточка предложения. Ничего не меняется, пока человек не нажмёт «Выполнить». Строит её `FileProposalBuilder` агента B |
+  | `propose_file_actions(actions, summary)` | Карточка предложения. Ничего не меняется, пока человек не нажмёт «Выполнить». Строит её `FileProposalBuilder` агента B. `parent_folder_id` — внутри какой папки создать новую (`create_folder`, `new_folder_name`) |
 
   - `show_cards` и `propose_file_actions` — последние: если они показали
     карточку, ответ готов без лишнего раунда за текстом. Не показали (чужой

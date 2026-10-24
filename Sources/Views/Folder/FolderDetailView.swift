@@ -24,6 +24,9 @@ enum FileDisplayMode: String, CaseIterable {
 
 struct FolderDetailView: View {
     @Environment(VaultStore.self) private var store
+    @Environment(\.folderPath) private var folderPath
+    @Environment(\.revealsHiddenFolders) private var revealsHiddenFolders
+    @Environment(\.folderZoomNamespace) private var zoomNamespace
     @AppStorage("fileDisplayMode") private var displayModeRaw = FileDisplayMode.grid.rawValue
 
     let folder: VaultFolder
@@ -49,6 +52,11 @@ struct FolderDetailView: View {
     @State private var toast: String?
     /// Над папкой держат файл из другого приложения
     @State private var isDropTargeted = false
+    @State private var isCreatingFolder = false
+    @State private var editingFolder: VaultFolder?
+    @State private var movingFolder: VaultFolder?
+    /// Вложенная папка, удаление которой ждёт подтверждения
+    @State private var folderPendingDelete: VaultFolder?
 
     /// Что не получилось и что с этим делать
     private struct Failure {
@@ -61,6 +69,29 @@ struct FolderDetailView: View {
     }
 
     private var accent: Color { Theme.color(folder.color) }
+
+    /// Папка из хранилища: имя и место в дереве могли поменять, пока открыт экран
+    private var currentFolder: VaultFolder { store.folder(by: folder.id) ?? folder }
+
+    /// Вложенные папки. Суперскрытая видна, только когда скрытые открыты жестом
+    private var allSubfolders: [VaultFolder] {
+        store.children(of: folder.id).filter { revealsHiddenFolders || !$0.isSuperHidden }
+    }
+
+    /// Поиск по папке находит и вложенные папки по имени
+    private var subfolders: [VaultFolder] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return allSubfolders }
+        return allSubfolders.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    }
+
+    /// При перестановке файлов папки убираются: перетаскивать их некуда
+    private var showsSubfolders: Bool { !subfolders.isEmpty && !isReordering }
+
+    /// Путь от верхнего уровня до этой папки — для крошек
+    private var lineage: [VaultFolder] { store.lineage(of: currentFolder) }
+
+    private var showsBreadcrumbs: Bool { lineage.count > 1 && folderPath != nil }
 
     private var sortOrder: FileSortOrder {
         store.folder(by: folder.id)?.sortOrder ?? folder.sortOrder
@@ -97,7 +128,7 @@ struct FolderDetailView: View {
             .ignoresSafeArea()
             .allowsHitTesting(false)
 
-            if store.files(in: folder).isEmpty {
+            if store.files(in: folder).isEmpty && allSubfolders.isEmpty {
                 emptyState
             } else {
                 VStack(spacing: 0) {
@@ -113,7 +144,7 @@ struct FolderDetailView: View {
                 }
                     .searchable(text: $search, prompt: "Поиск в папке")
                     .overlay {
-                        if files.isEmpty && !search.isEmpty {
+                        if files.isEmpty && subfolders.isEmpty && !search.isEmpty {
                             ContentUnavailableView.search(text: search)
                         }
                     }
@@ -135,10 +166,23 @@ struct FolderDetailView: View {
                     .id(toast)
             }
         }
+        // Крошки — только во вложенной папке: на первом уровне хватает «назад».
+        // Полоса под шапкой, а не содержимое прокрутки: вернуться можно с
+        // любого места папки. Большой заголовок полоса размыла бы краем
+        // прокрутки, а подзаголовком (.largeSubtitle) крошки пропадали вместе
+        // со свёрнутым заголовком — поэтому глубже первого уровня он обычный
+        .safeAreaBar(edge: .top) {
+            if showsBreadcrumbs {
+                FolderBreadcrumbs(lineage: lineage, accent: accent) { depth in
+                    folderPath?.wrappedValue = lineage.prefix(depth).map(\.id)
+                }
+                .disabled(isSelecting)
+            }
+        }
         .onDrop(of: dropTypes, isTargeted: $isDropTargeted, perform: acceptDrop)
         .task(id: folder.id) { await backfillContentDates() }
         .navigationTitle(navigationTitle)
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(showsBreadcrumbs ? .inline : .large)
         // В режиме выбора слева — «Выбрать все», как в «Файлах»
         .navigationBarBackButtonHidden(isSelecting)
         .tint(accent)
@@ -190,6 +234,34 @@ struct FolderDetailView: View {
         .sheet(item: $infoFile) { file in
             FileInfoSheet(file: file, folder: store.folder(by: folder.id) ?? folder)
         }
+        .sheet(isPresented: $isCreatingFolder) {
+            FolderEditorView(folder: nil, parentID: folder.id)
+        }
+        .sheet(item: $editingFolder) { subfolder in
+            FolderEditorView(folder: subfolder)
+        }
+        .sheet(item: $movingFolder) { subfolder in
+            FolderMoveSheet(folder: subfolder) { parentID in
+                move(subfolder, to: parentID)
+            }
+        }
+        .confirmationDialog(
+            FolderDeletion.title(for: folderPendingDelete),
+            isPresented: Binding(
+                get: { folderPendingDelete != nil },
+                set: { if !$0 { folderPendingDelete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: folderPendingDelete
+        ) { doomed in
+            Button(FolderDeletion.confirmTitle, role: .destructive) {
+                withAnimation { store.deleteFolder(doomed) }
+                folderPendingDelete = nil
+            }
+            Button("Отмена", role: .cancel) { folderPendingDelete = nil }
+        } message: { doomed in
+            Text(FolderDeletion.message(for: doomed, in: store))
+        }
         .confirmationDialog(
             deleteTitle,
             isPresented: Binding(
@@ -224,7 +296,7 @@ struct FolderDetailView: View {
     }
 
     private var navigationTitle: String {
-        guard let selection else { return folder.name }
+        guard let selection else { return currentFolder.name }
         return selection.isEmpty ? "Выберите файлы" : "Выбрано: \(selection.count)"
     }
 
@@ -329,6 +401,14 @@ struct FolderDetailView: View {
             }
             Section {
                 pasteButton
+            }
+            Section {
+                Button {
+                    isCreatingFolder = true
+                } label: {
+                    Label("Новая папка", systemImage: "folder.badge.plus")
+                }
+                .accessibilityIdentifier("newSubfolder")
             }
         } label: {
             Image(systemName: "plus")
@@ -455,53 +535,79 @@ struct FolderDetailView: View {
 
     private var listContent: some View {
         List {
-            ForEach(files) { file in
-                let row = FileRow(
-                    file: file,
-                    accent: accent,
-                    showsContentDate: sortOrder.showsContentDate,
-                    showsChevron: !isSelecting
-                )
-                Group {
-                    if isReordering {
-                        reorderable(file: file) { row }
-                    } else if let selection {
-                        let isSelected = selection.contains(file.name)
-                        Button {
-                            toggle(file)
-                        } label: {
-                            HStack(spacing: 12) {
-                                FileSelectionMark(isSelected: isSelected, accent: accent, placement: .inRow)
-                                row
+            if showsSubfolders {
+                Section {
+                    ForEach(subfolders) { subfolder in
+                        NavigationLink(value: subfolder.id) {
+                            FolderRow(
+                                folder: subfolder,
+                                stats: store.stats(for: subfolder, includingHidden: revealsHiddenFolders),
+                                marksHidden: subfolder.isSuperHidden,
+                                showsChevron: false
+                            )
+                        }
+                        .disabled(isSelecting)
+                        .zoomSource(subfolder.id, in: zoomNamespace)
+                        .contextMenu { subfolderMenu(for: subfolder) }
+                        .accessibilityIdentifier("subfolder-\(subfolder.name)")
+                        .listRowBackground(Theme.card)
+                        .listRowSeparatorTint(.black.opacity(0.06))
+                    }
+                } header: {
+                    sectionHeader("Папки")
+                }
+            }
+            Section {
+                ForEach(files) { file in
+                    let row = FileRow(
+                        file: file,
+                        accent: accent,
+                        showsContentDate: sortOrder.showsContentDate,
+                        showsChevron: !isSelecting
+                    )
+                    Group {
+                        if isReordering {
+                            reorderable(file: file) { row }
+                        } else if let selection {
+                            let isSelected = selection.contains(file.name)
+                            Button {
+                                toggle(file)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    FileSelectionMark(isSelected: isSelected, accent: accent, placement: .inRow)
+                                    row
+                                }
                             }
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(isSelected ? .isSelected : [])
-                    } else {
-                        Button { previewFile = file } label: { row }
                             .buttonStyle(.plain)
-                    }
-                }
-                .listRowBackground(Theme.card)
-                .listRowSeparatorTint(.black.opacity(0.06))
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    if !isSelecting && !isReordering {
-                        Button(role: .destructive) {
-                            pendingDelete = [file]
-                        } label: {
-                            Label("Удалить", systemImage: "trash")
+                            .accessibilityAddTraits(isSelected ? .isSelected : [])
+                        } else {
+                            Button { previewFile = file } label: { row }
+                                .buttonStyle(.plain)
                         }
-                        .tint(.red)
-                        Button {
-                            startRename(file)
-                        } label: {
-                            Label("Имя", systemImage: "pencil")
-                        }
-                        // Серый: под белой подписью заливка цветом текста в тёмной теме пропала бы
-                        .tint(.gray)
                     }
+                    .listRowBackground(Theme.card)
+                    .listRowSeparatorTint(.black.opacity(0.06))
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        if !isSelecting && !isReordering {
+                            Button(role: .destructive) {
+                                pendingDelete = [file]
+                            } label: {
+                                Label("Удалить", systemImage: "trash")
+                            }
+                            .tint(.red)
+                            Button {
+                                startRename(file)
+                            } label: {
+                                Label("Имя", systemImage: "pencil")
+                            }
+                            // Серый: под белой подписью заливка цветом текста в тёмной теме пропала бы
+                            .tint(.gray)
+                        }
+                    }
+                    .contextMenu { if !isReordering && !isSelecting { fileMenu(for: file) } }
                 }
-                .contextMenu { if !isReordering && !isSelecting { fileMenu(for: file) } }
+            } header: {
+                if showsSubfolders && !files.isEmpty { sectionHeader("Файлы") }
             }
         }
         .listStyle(.insetGrouped)
@@ -514,16 +620,29 @@ struct FolderDetailView: View {
             let padding: CGFloat = 20
             let side = (geo.size.width - padding * 2 - spacing) / 2
 
+            let columns = [
+                GridItem(.fixed(side), spacing: spacing),
+                GridItem(.fixed(side), spacing: spacing),
+            ]
+
             ScrollView {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.fixed(side), spacing: spacing),
-                        GridItem(.fixed(side), spacing: spacing),
-                    ],
-                    spacing: spacing
-                ) {
-                    ForEach(files) { file in
-                        gridCell(for: file, side: side)
+                VStack(alignment: .leading, spacing: 12) {
+                    if showsSubfolders {
+                        sectionHeader("Папки")
+                        LazyVGrid(columns: columns, spacing: spacing) {
+                            ForEach(subfolders) { subfolder in
+                                subfolderCard(subfolder)
+                            }
+                        }
+                        if !files.isEmpty {
+                            sectionHeader("Файлы")
+                                .padding(.top, 10)
+                        }
+                    }
+                    LazyVGrid(columns: columns, spacing: spacing) {
+                        ForEach(files) { file in
+                            gridCell(for: file, side: side)
+                        }
                     }
                 }
                 .padding(padding)
@@ -587,6 +706,71 @@ struct FolderDetailView: View {
             .padding(12)
             .allowsHitTesting(false)
             .transition(.opacity)
+    }
+
+    // MARK: - Вложенные папки
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(.subheadline, weight: .semibold))
+            .foregroundStyle(Theme.ink)
+            .textCase(nil)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    /// Карточка вложенной папки — та же, что на экране «Файлы»
+    private func subfolderCard(_ subfolder: VaultFolder) -> some View {
+        NavigationLink(value: subfolder.id) {
+            FolderCard(
+                folder: subfolder,
+                stats: store.stats(for: subfolder, includingHidden: revealsHiddenFolders),
+                preview: store.previewFiles(in: subfolder)
+            )
+            .overlay(alignment: .topTrailing) {
+                if subfolder.isSuperHidden {
+                    HiddenFolderBadge()
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(isSelecting)
+        .opacity(isSelecting ? 0.45 : 1)
+        .zoomSource(subfolder.id, in: zoomNamespace)
+        .contextMenu { subfolderMenu(for: subfolder) }
+        .accessibilityIdentifier("subfolder-\(subfolder.name)")
+    }
+
+    @ViewBuilder
+    private func subfolderMenu(for subfolder: VaultFolder) -> some View {
+        if let folderPath {
+            Button {
+                folderPath.wrappedValue.append(subfolder.id)
+            } label: {
+                Label("Открыть", systemImage: "folder")
+            }
+        }
+        Button {
+            editingFolder = subfolder
+        } label: {
+            Label("Изменить папку", systemImage: "pencil")
+        }
+        Button {
+            movingFolder = subfolder
+        } label: {
+            Label("Переместить…", systemImage: "folder.badge.gearshape")
+        }
+        Button(role: .destructive) {
+            folderPendingDelete = subfolder
+        } label: {
+            Label("Удалить папку", systemImage: "trash")
+        }
+    }
+
+    private func move(_ subfolder: VaultFolder, to parentID: UUID?) {
+        guard store.moveFolder(subfolder.id, to: parentID) else { return }
+        let destination = parentID.flatMap(store.folder(by:)).map { store.path(of: $0) } ?? "Мои файлы"
+        showToast("Папка перемещена в «\(destination)»")
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
     // MARK: - Выбор

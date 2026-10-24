@@ -1,11 +1,15 @@
 import SwiftUI
 
-// Создание и редактирование папки: тип, видимость, имя, иконка, цвет
+// Создание и редактирование папки: тип, видимость, имя, иконка, цвет.
+// Вложенная папка наследует скрытость и «вне поиска» от папок выше: такие
+// переключатели показывают унаследованное и не меняются
 struct FolderEditorView: View {
     @Environment(VaultStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
     let folder: VaultFolder?
+    /// Внутри какой папки создать новую; nil — на верхнем уровне
+    let parentID: UUID?
 
     @State private var name: String
     @State private var icon: String
@@ -14,8 +18,9 @@ struct FolderEditorView: View {
     @State private var isSuperHidden: Bool
     @State private var searchable: Bool
 
-    init(folder: VaultFolder?) {
+    init(folder: VaultFolder?, parentID: UUID? = nil) {
         self.folder = folder
+        self.parentID = folder?.parentID ?? parentID
         _name = State(initialValue: folder?.name ?? "")
         _icon = State(initialValue: folder?.icon ?? "folder.fill")
         _color = State(initialValue: folder?.color ?? "indigo")
@@ -26,6 +31,25 @@ struct FolderEditorView: View {
 
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var parent: VaultFolder? {
+        parentID.flatMap(store.folder(by:))
+    }
+
+    /// Папки выше этой, от верхнего уровня до родителя
+    private var ancestors: [VaultFolder] {
+        parent.map(store.lineage(of:)) ?? []
+    }
+
+    /// Ближайшая суперскрытая папка выше: она прячет и эту
+    private var hidingAncestor: VaultFolder? {
+        ancestors.last(where: \.isSuperHidden)
+    }
+
+    /// Ближайшая папка выше, выключенная из поиска: выключает и эту
+    private var unsearchableAncestor: VaultFolder? {
+        ancestors.last { !$0.isIndexable }
     }
 
     private let iconColumns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 5)
@@ -146,7 +170,14 @@ struct FolderEditorView: View {
             Text(kind.subtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if isSuperHidden {
+            if let parent {
+                Label("В папке «\(store.path(of: parent))»", systemImage: "folder")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            if isSuperHidden || hidingAncestor != nil {
                 Label("Суперскрытая", systemImage: "eye.slash.fill")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.color(color))
@@ -157,42 +188,63 @@ struct FolderEditorView: View {
     }
 
     private var visibilityPicker: some View {
-        Toggle(isOn: $isSuperHidden) {
+        Toggle(isOn: Binding(
+            get: { isSuperHidden || hidingAncestor != nil },
+            set: { isSuperHidden = $0 }
+        )) {
             VStack(alignment: .leading, spacing: 3) {
                 Label("Суперскрытая папка", systemImage: "eye.slash.fill")
                     .font(.system(.subheadline, weight: .semibold))
-                Text("Не показывать на главном экране и в недавних до секретного жеста")
+                Text(visibilityCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .tint(Theme.color(color))
+        .disabled(hidingAncestor != nil)
         .padding(14)
         .cardStyle(cornerRadius: 14)
+    }
+
+    private var visibilityCaption: String {
+        if let hidingAncestor {
+            return "Скрыта вместе с папкой «\(hidingAncestor.name)»"
+        }
+        return parent == nil
+            ? "Не показывать на главном экране и в недавних до секретного жеста"
+            : "Не показывать в папке и в недавних до секретного жеста"
     }
 
     /// У суперскрытой папки переключатель выключен и не включается: то, чего
     /// нет в индексе, поиск найти не может
     private var searchPicker: some View {
-        Toggle(isOn: Binding(
-            get: { searchable && !isSuperHidden },
+        let hidden = isSuperHidden || hidingAncestor != nil
+        let inherited = !hidden && unsearchableAncestor != nil
+        return Toggle(isOn: Binding(
+            get: { searchable && !hidden && !inherited },
             set: { searchable = $0 }
         )) {
             VStack(alignment: .leading, spacing: 3) {
                 Label("Доступна для поиска", systemImage: "text.magnifyingglass")
                     .font(.system(.subheadline, weight: .semibold))
-                Text(isSuperHidden
-                    ? "Суперскрытые папки не распознаются и не ищутся"
-                    : "Текст документов распознаётся на iPhone и находится в поиске")
+                Text(searchCaption(hidden: hidden))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .tint(Theme.color(color))
-        .disabled(isSuperHidden)
+        .disabled(hidden || inherited)
         .padding(14)
         .cardStyle(cornerRadius: 14)
         .accessibilityIdentifier("folderSearchable")
+    }
+
+    private func searchCaption(hidden: Bool) -> String {
+        if hidden { return "Суперскрытые папки не распознаются и не ищутся" }
+        if let unsearchableAncestor {
+            return "Поиск выключен у папки «\(unsearchableAncestor.name)» — и для всего внутри неё"
+        }
+        return "Текст документов распознаётся на iPhone и находится в поиске"
     }
 
     private var folderKindPicker: some View {
@@ -257,7 +309,8 @@ struct FolderEditorView: View {
                 color: color,
                 kind: kind,
                 isSuperHidden: isSuperHidden,
-                searchable: searchable
+                searchable: searchable,
+                parentID: parentID
             )
         }
         dismiss()

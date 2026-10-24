@@ -89,7 +89,7 @@ struct FilePlacementAdvisor {
         let counts = Dictionary(grouping: documents, by: \.folderID).mapValues(\.count)
         return counts.sorted { $0.value > $1.value }
             .compactMap { store.folder(by: $0.key) }
-            .first { $0.isIndexable }
+            .first(where: store.isIndexable)
     }
 
     /// Папка, чьё название встречается в имени файла или тексте: «Договор
@@ -98,7 +98,8 @@ struct FilePlacementAdvisor {
         let stems = Set(SearchText.tokens(in: text).map(\.stem).filter { $0.count >= 3 })
         guard !stems.isEmpty else { return nil }
         var best: (folder: VaultFolder, score: Int)?
-        for folder in store.folders where folder.isIndexable && folder.name != inboxFolderName {
+        // Вложенная папка в скрытой или вне поиска не годится, как и сама скрытая
+        for folder in store.folders where store.isIndexable(folder) && folder.name != inboxFolderName {
             let words = SearchText.tokens(in: folder.name).map(\.stem).filter { $0.count >= 3 }
             let score = words.filter(stems.contains).count
             if score > 0, score > (best?.score ?? 0) { best = (folder, score) }
