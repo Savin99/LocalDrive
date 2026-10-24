@@ -11,7 +11,6 @@ struct ChatView: View {
     @Environment(SearchService.self) private var search
     @Environment(VaultStore.self) private var store
     @Environment(FactStore.self) private var facts
-    @Environment(\.isOffscreenPage) private var isOffscreenPage
 
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
@@ -80,7 +79,7 @@ struct ChatView: View {
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerAreaHeight = $0 }
             }
             // Чат за краем экрана, пока открыты «Файлы»
-            .accessibilityHidden(isOffscreenPage)
+            .hiddenWhenOffscreenPage()
             .navigationTitle("Чат")
             .navigationBarTitleDisplayMode(.inline)
             // Посередине шапки стоит общий переключатель «Чат | Файлы»

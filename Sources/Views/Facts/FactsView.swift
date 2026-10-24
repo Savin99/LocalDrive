@@ -6,7 +6,6 @@ import SwiftUI
 // удалением, «+» — редактор новой
 struct FactsView: View {
     @Environment(FactStore.self) private var store
-    @Environment(\.isOffscreenPage) private var isOffscreenPage
 
     @State private var query = ""
     @State private var isCreating = false
@@ -43,7 +42,7 @@ struct FactsView: View {
             .toolbar(removing: .title)
             .searchable(text: $query, prompt: "Найти: дом Камилы, домофон")
             // Страница за краем экрана прячется от VoiceOver изнутри, см. MainView
-            .accessibilityHidden(isOffscreenPage)
+            .hiddenWhenOffscreenPage()
             .navigationDestination(for: UUID.self) { id in
                 FactDetailView(cardID: id)
             }
