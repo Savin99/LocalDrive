@@ -158,10 +158,15 @@ struct MainView: View {
     }
 
     /// Штрих по корню «Файлов»: знак открывает скрытые папки, прямой свайп
-    /// вправо возвращает к чату, влево — открывает «Карточки»
+    /// вправо возвращает к чату, влево — открывает «Карточки».
+    ///
+    /// Слушает каждое касание корня, и пока страницы доезжают тоже. Раньше
+    /// ждал конца пружины (`isSettling`): она снимается через ~0,6 с, а на
+    /// вид страница встаёт за ~0,3 с. Свайп в это окно никто не перехватывал,
+    /// и открывалась карточка под пальцем (UI-тест PagerTapUITests)
     private var filesStroke: FilesStrokeGesture {
         FilesStrokeGesture(edgeWidth: Self.edgeWidth) {
-            page == .files && filesDepth == 0 && !isDragging && !isSettling
+            page == .files && filesDepth == 0 && !isDragging
         } onEnd: { stroke in
             if store.folders.contains(where: \.isSuperHidden) {
                 var recognized = false
