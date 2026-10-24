@@ -17,8 +17,9 @@ struct MainView: View {
     @Environment(FactStore.self) private var facts
 
     @State private var page = MainPage.chat
-    /// Сдвиг страниц за пальцем во время свайпа
-    @State private var dragOffset: CGFloat = 0
+    /// Сдвиг страниц за пальцем во время свайпа. Отдельный объект, а не
+    /// @State экрана: тело MainView не пересобирается на каждом кадре
+    @State private var motion = PagerMotion()
     /// Палец ведёт страницы: видны обе
     @State private var isDragging = false
     /// Страницы доезжают на место после свайпа или нажатия на переключатель
@@ -70,7 +71,7 @@ struct MainView: View {
                     .environment(\.isOffscreenPage, isOffscreen(.cards))
             }
             .frame(width: width, alignment: .leading)
-            .offset(x: -CGFloat(page.index) * width + dragOffset)
+            .modifier(PagerOffset(motion: motion, base: -CGFloat(page.index) * width))
             .gesture(pagingGesture(width: width, height: proxy.size.height))
             .gesture(filesStroke)
             .overlay(alignment: .top) {
@@ -78,7 +79,7 @@ struct MainView: View {
                     // Внутри папки переключателя нет совсем: прозрачный
                     // оставался в дереве доступности (проверено UI-тестом)
                     if showsSwitcher {
-                        PageSwitcher(progress: progress(width: width)) { select($0) }
+                        PageSwitcher(page: page, motion: motion, width: width) { select($0) }
                             .dynamicTypeSize(...DynamicTypeSize.xxLarge)
                             .transition(.opacity)
                     }
@@ -112,13 +113,6 @@ struct MainView: View {
         .onChange(of: hiddenFolders.revealCount) { _, _ in select(.files) }
     }
 
-    /// 0 — чат, 1 — «Файлы», 2 — «Карточки»; во время свайпа дробное:
-    /// капсула идёт за пальцем
-    private func progress(width: CGFloat) -> CGFloat {
-        guard width > 0 else { return CGFloat(page.index) }
-        return min(max(CGFloat(page.index) - dragOffset / width, 0), CGFloat(MainPage.allCases.count - 1))
-    }
-
     private func select(_ target: MainPage) {
         guard target != page else { return }
         settle(on: target)
@@ -129,7 +123,7 @@ struct MainView: View {
         isSettling = true
         withAnimation(Self.settle, completionCriteria: .removed) {
             page = target
-            dragOffset = 0
+            motion.dragOffset = 0
         } completion: {
             isSettling = false
         }
@@ -141,8 +135,8 @@ struct MainView: View {
         PagerPan(space: Self.space) { start, dx in
             canPage(from: start, dx: dx, width: width, height: height)
         } onChange: { dx in
-            isDragging = true
-            dragOffset = resisted(dx, width: width)
+            if !isDragging { isDragging = true }
+            motion.dragOffset = resisted(dx, width: width)
         } onEnd: { dx, velocity in
             let forward = dx < -width * 0.3 || (dx < 0 && velocity < -Self.flingVelocity)
             let back = dx > width * 0.3 || (dx > 0 && velocity > Self.flingVelocity)
@@ -158,10 +152,15 @@ struct MainView: View {
     }
 
     /// Штрих по корню «Файлов»: знак открывает скрытые папки, прямой свайп
-    /// вправо возвращает к чату, влево — открывает «Карточки»
+    /// вправо возвращает к чату, влево — открывает «Карточки».
+    ///
+    /// Слушает каждое касание корня, и пока страницы доезжают тоже. Раньше
+    /// ждал конца пружины (`isSettling`): она снимается через ~0,6 с, а на
+    /// вид страница встаёт за ~0,3 с. Свайп в это окно никто не перехватывал,
+    /// и открывалась карточка под пальцем (UI-тест PagerTapUITests)
     private var filesStroke: FilesStrokeGesture {
         FilesStrokeGesture(edgeWidth: Self.edgeWidth) {
-            page == .files && filesDepth == 0 && !isDragging && !isSettling
+            page == .files && filesDepth == 0 && !isDragging
         } onEnd: { stroke in
             if store.folders.contains(where: \.isSuperHidden) {
                 var recognized = false
@@ -304,11 +303,48 @@ enum MainPage: CaseIterable, Hashable {
     }
 }
 
+/// Сдвиг страниц за пальцем. Меняется на каждом кадре свайпа, поэтому его
+/// читают только `PagerOffset` и переключатель: кадр пересчитывает их, а не
+/// тело MainView с тремя страницами, жестами и модификаторами
+@Observable
+private final class PagerMotion {
+    var dragOffset: CGFloat = 0
+}
+
+/// Сдвигает ленту страниц: `base` — место текущей страницы, сверху палец
+private struct PagerOffset: ViewModifier {
+    let motion: PagerMotion
+    let base: CGFloat
+
+    func body(content: Content) -> some View {
+        content.offset(x: base + motion.dragOffset)
+    }
+}
+
 extension EnvironmentValues {
     /// Страница главного экрана стоит за краем. Её содержимое прячется от
     /// VoiceOver изнутри: модификатор снаружи NavigationStack до экранов
     /// внутри неё не доходит (проверено деревом доступности в UI-тесте)
     @Entry var isOffscreenPage = false
+}
+
+extension View {
+    /// Прячет от VoiceOver страницу главного экрана, пока она за краем.
+    /// Ставится внутри NavigationStack страницы
+    func hiddenWhenOffscreenPage() -> some View {
+        modifier(OffscreenPageAccessibility())
+    }
+}
+
+/// Значение `isOffscreenPage` читает этот модификатор, а не тело страницы:
+/// оно меняется в начале и в конце каждого листания, и тело страницы
+/// пересобиралось бы целиком — у «Файлов» это чтение папок с диска
+private struct OffscreenPageAccessibility: ViewModifier {
+    @Environment(\.isOffscreenPage) private var isOffscreenPage
+
+    func body(content: Content) -> some View {
+        content.accessibilityHidden(isOffscreenPage)
+    }
 }
 
 /// Глубина навигации «Файлов»: HomeView сообщает, открыта ли папка
@@ -333,12 +369,22 @@ struct ChatComposerHeightKey: PreferenceKey {
 /// которые понравились владельцу, и как соседние кнопки шапки. Выбранная
 /// страница подсвечена серой плашкой. Сам стоит на месте, пока страницы едут
 private struct PageSwitcher: View {
-    let progress: CGFloat
+    let page: MainPage
+    let motion: PagerMotion
+    let width: CGFloat
     let onSelect: (MainPage) -> Void
 
     @ScaledMetric(relativeTo: .subheadline) private var segmentWidth: CGFloat = 76
     /// Вместе с отступами 44 pt — как круглые кнопки по бокам шапки
     private let segmentHeight: CGFloat = 36
+
+    /// 0 — чат, 1 — «Файлы», 2 — «Карточки»; во время свайпа дробное:
+    /// капсула идёт за пальцем
+    private var progress: CGFloat {
+        guard width > 0 else { return CGFloat(page.index) }
+        let raw = CGFloat(page.index) - motion.dragOffset / width
+        return min(max(raw, 0), CGFloat(MainPage.allCases.count - 1))
+    }
 
     var body: some View {
         let index = min(max(Int(progress.rounded()), 0), MainPage.allCases.count - 1)

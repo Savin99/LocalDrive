@@ -3,7 +3,6 @@ import SwiftUI
 struct HomeView: View {
     @Environment(VaultStore.self) private var store
     @Environment(HiddenFolders.self) private var hiddenFolders
-    @Environment(\.isOffscreenPage) private var isOffscreenPage
 
     @State private var editingFolder: VaultFolder?
     @State private var isCreating = false
@@ -82,7 +81,7 @@ struct HomeView: View {
                 .toolbar(removing: .title)
                 .searchable(text: $query, prompt: "Найти в документах")
                 // «Файлы» за краем экрана, пока открыт чат
-                .accessibilityHidden(isOffscreenPage)
+                .hiddenWhenOffscreenPage()
                 .navigationDestination(for: UUID.self) { id in
                     if let folder = store.folder(by: id) {
                         Group {
