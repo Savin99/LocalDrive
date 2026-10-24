@@ -10,7 +10,11 @@ import XCTest
 // они встали. Штрих по карточке сразу после свайпа с чата открывал её:
 // штрих «Файлов» не слушал касания, пока не затихнет пружина листания
 final class PagerTapUITests: XCTestCase {
-    private let names = (1...6).map { "Тап \($0)" }
+    /// Имена с номером прогона: папки прошлых запусков остаются на симуляторе
+    private let names: [String] = {
+        let run = Int.random(in: 100...999)
+        return (1...6).map { "Тап \($0)-\(run)" }
+    }()
 
     func testFolderTapRightAfterPagingOpensTappedFolder() throws {
         let app = XCUIApplication()
@@ -24,74 +28,97 @@ final class PagerTapUITests: XCTestCase {
 
         filesPage.tap()
         XCTAssertTrue(waitUntil { newFolder.isHittable }, "переключатель не открыл «Файлы»")
-        for name in names where !app.staticTexts[name].firstMatch.exists {
+        for name in names {
             createFolder(name, in: app)
         }
 
-        // Середины подписей карточек в покое — сюда и жмём
-        var targets: [String: CGPoint] = [:]
-        for name in names {
-            let label = app.staticTexts[name].firstMatch
-            XCTAssertTrue(label.isHittable, "карточка «\(name)» не видна целиком\n" + app.debugDescription)
-            targets[name] = CGPoint(x: label.frame.midX, y: label.frame.midY)
-        }
+        // Середины подписей карточек в покое — сюда и жмём. Меряются заново
+        // перед каждым сценарием: папки других тестов сдвигают сетку, и
+        // первая папка теста может встать в любой столбец
+        let names = self.names
         let width = app.windows.firstMatch.frame.width
+        var targets = measureCards(in: app)
         XCTAssertEqual(Set(targets.values.map { $0.x < width / 2 }).count, 2, "папки не в два столбца")
+        /// Карточки столбца сверху вниз
+        func column(left: Bool) -> [String] {
+            names.filter { (targets[$0]!.x < width / 2) == left }.sorted { targets[$0]!.y < targets[$1]!.y }
+        }
 
-        // Свайп с карточки начинается на ней, а жмём потом другую: нажатие,
-        // прерванное свайпом, не должно достаться следующему касанию
-        let scenarios: [(name: String, startCard: String?, run: () -> Void)] = [
-            ("переключатель с чата", nil, {
+        // Сценарий возвращает карточку, на которой начался жест: жмём потом
+        // другую — нажатие, прерванное жестом, не должно достаться следующему
+        // касанию. Свайп к чату — из левого столбца, к «Карточкам» — из
+        // правого: иначе путь до края короче порога листания
+        let scenarios: [(name: String, scrolls: Bool, run: () -> String?)] = [
+            ("переключатель с чата", false, {
                 chatPage.tap()
                 XCTAssertTrue(self.waitUntil { chatPage.isSelected })
                 filesPage.tap()
+                return nil
             }),
-            ("свайп влево с чата", nil, {
+            ("свайп влево с чата", false, {
                 chatPage.tap()
                 XCTAssertTrue(self.waitUntil { chatPage.isSelected })
                 app.swipeLeft()
+                return nil
             }),
-            ("недотянутый свайп от левого края", nil, {
-                self.drag(app, from: CGPoint(x: 3, y: targets["Тап 3"]!.y), by: CGVector(dx: width * 0.2, dy: 0))
+            ("недотянутый свайп от левого края", false, {
+                let y = targets[column(left: true)[1]]!.y
+                self.drag(app, from: CGPoint(x: 3, y: y), by: CGVector(dx: width * 0.2, dy: 0))
+                return nil
             }),
-            ("недотянутый свайп от правого края", nil, {
-                self.drag(app, from: CGPoint(x: width - 3, y: targets["Тап 4"]!.y), by: CGVector(dx: -width * 0.2, dy: 0))
+            ("недотянутый свайп от правого края", false, {
+                let y = targets[column(left: false)[1]]!.y
+                self.drag(app, from: CGPoint(x: width - 3, y: y), by: CGVector(dx: -width * 0.2, dy: 0))
+                return nil
             }),
-            ("свайп вправо с «Карточек»", nil, {
+            ("свайп вправо с «Карточек»", false, {
                 cardsPage.tap()
                 XCTAssertTrue(self.waitUntil { cardsPage.isSelected })
                 app.swipeRight()
+                return nil
             }),
-            ("свайп с карточки к чату и обратно", "Тап 3", {
-                let start = targets["Тап 3"]!
+            ("свайп с карточки к чату и обратно", false, {
+                let card = column(left: true)[1]
+                let start = targets[card]!
                 self.drag(app, from: start, by: CGVector(dx: width - 8 - start.x, dy: 0), velocity: .fast)
-                XCTAssertTrue(self.waitUntil { chatPage.isSelected })
+                XCTAssertTrue(self.waitUntil { chatPage.isSelected }, "свайп с карточки не увёл к чату")
                 app.swipeLeft()
+                return card
             }),
-            ("свайп с карточки к «Карточкам» и обратно", "Тап 4", {
-                let start = targets["Тап 4"]!
+            ("свайп с карточки к «Карточкам» и обратно", false, {
+                let card = column(left: false)[1]
+                let start = targets[card]!
                 self.drag(app, from: start, by: CGVector(dx: 8 - start.x, dy: 0), velocity: .fast)
-                XCTAssertTrue(self.waitUntil { cardsPage.isSelected })
+                XCTAssertTrue(self.waitUntil { cardsPage.isSelected }, "свайп с карточки не открыл «Карточки»")
                 app.swipeRight()
+                return card
             }),
-            ("короткий штрих по карточке без листания", "Тап 5", {
-                self.drag(app, from: targets["Тап 5"]!, by: CGVector(dx: 60, dy: 0))
+            ("короткий штрих по карточке без листания", false, {
+                let card = column(left: true)[2]
+                self.drag(app, from: targets[card]!, by: CGVector(dx: 60, dy: 0))
+                return card
             }),
-            ("протяжка вниз с карточки", "Тап 2", {
-                self.drag(app, from: targets["Тап 2"]!, by: CGVector(dx: 0, dy: 80))
+            ("протяжка вниз с карточки", true, {
+                let card = column(left: false)[0]
+                self.drag(app, from: targets[card]!, by: CGVector(dx: 0, dy: 80))
+                return card
             }),
             // Страница уже стоит, но пружина ещё не затихла
-            ("штрих по карточке сразу после переключателя", "Тап 5", {
+            ("штрих по карточке сразу после переключателя", false, {
+                let card = column(left: true)[0]
                 chatPage.tap()
                 XCTAssertTrue(self.waitUntil { chatPage.isSelected })
                 filesPage.tap()
-                self.drag(app, from: targets["Тап 5"]!, by: CGVector(dx: 60, dy: 0))
+                self.drag(app, from: targets[card]!, by: CGVector(dx: 60, dy: 0))
+                return card
             }),
-            ("штрих по карточке сразу после свайпа с чата", "Тап 6", {
+            ("штрих по карточке сразу после свайпа с чата", false, {
+                let card = column(left: false)[2]
                 chatPage.tap()
                 XCTAssertTrue(self.waitUntil { chatPage.isSelected })
                 app.swipeLeft()
-                self.drag(app, from: targets["Тап 6"]!, by: CGVector(dx: -60, dy: 0))
+                self.drag(app, from: targets[card]!, by: CGVector(dx: -60, dy: 0))
+                return card
             }),
         ]
 
@@ -100,12 +127,15 @@ final class PagerTapUITests: XCTestCase {
         var misses: [String] = []
         for (round, waitsForSettle) in [false, true].enumerated() {
             for (index, scenario) in scenarios.enumerated() {
+                targets = measureCards(in: app)
+                let startCard = scenario.run()
                 var target = names[order[(index + round) % order.count]]
-                if target == scenario.startCard {
+                if target == startCard {
                     target = names[order[(index + round + 1) % order.count]]
                 }
-                scenario.run()
-                if waitsForSettle { Thread.sleep(forTimeInterval: 1) }
+                if waitsForSettle || scenario.scrolls { Thread.sleep(forTimeInterval: 1) }
+                // Протяжка вниз прокручивает сетку, если папок много
+                if scenario.scrolls { targets = measureCards(in: app) }
                 let early = app.navigationBars.matching(NSPredicate(format: "identifier IN %@", names)).firstMatch
                 if early.exists {
                     misses.append("\(scenario.name): папку «\(early.identifier)» открыл сам жест")
@@ -135,6 +165,37 @@ final class PagerTapUITests: XCTestCase {
     }
 
     // MARK: - Хелперы
+
+    /// Карточки теста — в кадр, и середины их подписей. В симуляторе остаются
+    /// папки других тестов, и папки теста оказываются в конце сетки
+    private func measureCards(in app: XCUIApplication) -> [String: CGPoint] {
+        let labels = names.map { app.staticTexts[$0].firstMatch }
+        let middle = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
+        let height = app.windows.firstMatch.frame.height
+        // Под шапкой и над нижним полем поиска: подпись под стеклянным полем
+        // XCTest считает доступной, а нажатие достаётся полю
+        func inView(_ label: XCUIElement) -> Bool {
+            label.isHittable && label.frame.minY > 120 && label.frame.maxY < height - 80
+        }
+        var attempts = 0
+        while attempts < 20, !labels.allSatisfy(inView) {
+            attempts += 1
+            if !labels.last!.exists {
+                // Сетка ещё не дошла до конца — быстрее взмахом
+                app.swipeUp()
+                continue
+            }
+            // Последняя не видна — листаем вниз, первая ушла за верх — назад
+            let offset: CGFloat = inView(labels.last!) ? 150 : -150
+            middle.press(forDuration: 0.05, thenDragTo: middle.withOffset(CGVector(dx: 0, dy: offset)))
+        }
+        var points: [String: CGPoint] = [:]
+        for (name, label) in zip(names, labels) {
+            XCTAssertTrue(inView(label), "карточка «\(name)» не видна целиком\n" + app.debugDescription)
+            points[name] = CGPoint(x: label.frame.midX, y: label.frame.midY)
+        }
+        return points
+    }
 
     /// Какая из папок теста открылась: её имя — заголовок шапки
     private func openedFolder(in app: XCUIApplication) -> String? {
@@ -168,7 +229,8 @@ final class PagerTapUITests: XCTestCase {
         field.tap()
         field.typeText(name)
         app.buttons["Готово"].tap()
-        XCTAssertTrue(app.staticTexts[name].firstMatch.waitForExistence(timeout: 5), "папка «\(name)» не появилась")
+        // Карточка встаёт в конец сетки и может быть за краем: её ищет measureCards
+        XCTAssertTrue(waitUntil { !field.exists && app.buttons["Новая папка"].isHittable }, "редактор папки «\(name)» не закрылся")
     }
 
     private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
