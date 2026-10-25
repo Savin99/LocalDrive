@@ -338,7 +338,7 @@ struct ChatView: View {
     }
 
     /// «+» — вложения: фото, файл, вставка из буфера. Брошенные файлы видны
-    /// над строкой ввода, в хранилище они попадают только по «Выполнить»
+    /// над строкой ввода, в хранилище они попадают только по «Принять»
     private var attachButton: some View {
         ChatAttachmentMenu(inbox: session.inbox) { _ in
             composerFocused = false

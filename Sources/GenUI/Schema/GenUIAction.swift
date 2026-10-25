@@ -15,7 +15,7 @@ enum GenUIAction: Hashable, Sendable {
     case openFolder(folderID: UUID)
     case remind(documentID: Int64)
     /// Аргументы как у инструмента `propose_file_actions`: их проверяет и
-    /// показывает карточкой FileProposalBuilder, выполняет только «Выполнить»
+    /// показывает карточкой FileProposalBuilder, выполняет только «Принять»
     case proposeFileActions(arguments: JSONValue)
 
     enum Kind: String, CaseIterable, Sendable {

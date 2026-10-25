@@ -76,6 +76,9 @@ final class ChatFieldFixTests: XCTestCase {
         let correct = try XCTUnwrap(ChatFieldFix("в фамилии ошибка, правильно Трошкина"))
         XCTAssertEqual(correct.resolvedValue(current: "Трошина Ольга Петровна"), "Трошкина Ольга Петровна")
 
+        XCTAssertNotNil(ChatFieldFix("фамилия не так написана"))
+        XCTAssertNotNil(ChatFieldFix("что-то не так с фамилией"))
+        XCTAssertNil(ChatFieldFix("что-то не так"), "поле не названо — не поправка")
         XCTAssertNil(ChatFieldFix("какая дата рождения у Анны"), "вопрос — не поправка")
         XCTAssertNil(ChatFieldFix("паспорт Ольги"))
     }
@@ -119,12 +122,29 @@ final class ChatFieldFixTests: XCTestCase {
         XCTAssertEqual(key, FieldKey.fullName)
         XCTAssertEqual(value, "Иванчук Анна Сергеевна")
 
-        // «Исправить» — поле ручное, и дальше чат отвечает уже им
+        // «Принять» — поле ручное, и дальше чат отвечает уже им
         await search.setManualField(documentID: id, key: key, value: value)
         let fields = await search.fields(for: [id])[id] ?? []
         let name = try XCTUnwrap(fields.first { $0.key == FieldKey.fullName })
         XCTAssertEqual(name.value, "Иванчук Анна Сергеевна")
         XCTAssertEqual(name.source, .manual)
+    }
+
+    /// Ответ на «как правильно?» разными словами — та же поправка, тот же
+    /// документ, отчество на месте (владелец 25.10.2026)
+    func testAnswerToHowIsItRightInOtherWords() async throws {
+        let anna = try await indexPassport()
+        for answer in ["правильно Иванчук", "фамилия Иванчук", "должна быть Иванчук", "Иванчук Анна"] {
+            let session = ChatSession(search: search)
+            _ = try await ask(session, "паспорт Анны")
+            let question = try await ask(session, "там фамилия неправильно написана")
+            XCTAssertTrue(question.text.contains("правильную фамилию"), question.text)
+            let proposal = try await ask(session, answer)
+            let (id, key, value) = try XCTUnwrap(fix(in: proposal), "«\(answer)»: \(proposal.text)")
+            XCTAssertEqual(id, anna.id, answer)
+            XCTAssertEqual(key, FieldKey.fullName, answer)
+            XCTAssertEqual(value, "Иванчук Анна Сергеевна", answer)
+        }
     }
 
     func testDateFixWithValueInOneMessage() async throws {

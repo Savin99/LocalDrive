@@ -330,16 +330,21 @@ final class CloudChatTools {
         guard let raw = arguments["document_id"]?.string, let id = ChatCard.decodeID(raw),
               await !search.documents(ids: [id]).isEmpty else { return ["error": "Документ не найден"] }
         guard let key = arguments["key"]?.string, FieldKey.order.contains(key) else { return ["error": "Нет такого поля"] }
-        guard let value = arguments["value"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
-            return ["error": "Нужно правильное значение целиком"]
+        // «?», «…» вместо значения — модель его не знает: пусть спросит.
+        // Живая проверка 25.10.2026: карточка «станет: ?»
+        guard let value = arguments["value"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+              value.contains(where: { $0.isLetter || $0.isNumber }) else {
+            return ["error": "Правильное значение неизвестно — спроси человека, как правильно, и не показывай карточку"]
         }
         var normalized = ChatFieldFix.isDate(key) ? (ChatFieldFix.normalizedDate(value) ?? value) : value
-        // «Трошкина» вместо ФИО целиком — это фамилия: имя и отчество остаются;
-        // «Трошкина О. П.», «Ольга Трошкина» — правка ложится на текущее ФИО
+        // «Трошкина О. П.», «Ольга Трошкина», «Трошкина» — правка ложится на
+        // текущее ФИО: одно новое слово заменяет самое похожее; ни на что не
+        // похожее одно слово — фамилия
         if key == FieldKey.fullName,
            let current = await search.fields(for: [id])[id]?.first(where: { $0.key == key })?.value {
-            if normalized.contains(" ") {
-                normalized = ChatFieldFix.correctedName(normalized, current: current)
+            let corrected = ChatFieldFix.correctedName(normalized, current: current)
+            if corrected.contains(" ") {
+                normalized = corrected
             } else {
                 let fix = ChatFieldFix(key: key, namePart: .surname, answer: normalized)
                 normalized = fix.resolvedValue(current: current) ?? normalized
@@ -353,7 +358,7 @@ final class CloudChatTools {
         guard let proposals else { return ["error": "Действия с файлами пока недоступны в этой сборке"] }
         do {
             cards.append(try proposals(await resolvingDocuments(arguments).data))
-            return ["proposed": true, "note": "Ничего не изменится, пока человек не нажмёт «Выполнить»"]
+            return ["proposed": true, "note": "Ничего не изменится, пока человек не нажмёт «Принять»"]
         } catch {
             return ["error": .string("Предложение не собралось: \(error.localizedDescription)")]
         }
@@ -439,7 +444,7 @@ enum CloudChatPrompt {
     Паспорт РФ хранится разворотами — отдельными документами в одной папке: прописка, брак, дети — на других разворотах (other_pages в get_document, в списке документов — рядом).
     Если вопрос неоднозначный — например, подходят паспорта разных людей, — покажи карточку clarify с вариантами.
     Файлы сам не меняешь: чтобы положить вложение, перенести, переименовать файл или создать папку, вызови propose_file_actions — человек подтвердит кнопкой.
-    Человек говорит, что поле распознано с ошибкой («в фамилии ошибка», «дата рождения неправильная»), — вызови propose_field_fix с правильным значением целиком; если его не назвали — спроси. Поле исправит человек кнопкой.
+    Человек говорит, что поле распознано с ошибкой («в фамилии ошибка», «дата рождения неправильная»), — вызови propose_field_fix для документа, о котором шла речь. Назвали одну фамилию (имя, отчество) — передай в value только её: остальное приложение возьмёт из документа. Значение не назвали — спроси одним вопросом; ответ человека и есть значение: сразу propose_field_fix для того же документа, не ищи по нему документы. Поле исправит человек кнопкой «Принять».
     Вложения из сообщения ты видишь как картинки; их id — a1, a2…, они перечислены в тексте сообщения. Предлагай, в какую папку их положить и как назвать.
     Если нужный документ есть в списке документов ниже, сразу вызови show_cards — без поиска. Короткий текст ответа пиши в том же ходе, что и show_cards.
     Краткие итоги своих рассуждений пиши по-русски.
@@ -558,20 +563,20 @@ enum CloudChatPrompt {
         ],
         [
             "name": "propose_field_fix",
-            "description": "Исправить поле документа, которое распознавание прочитало неверно. Показывает «было → станет»; поле меняется, только когда человек нажмёт «Исправить».",
+            "description": "Исправить поле документа, которое распознавание прочитало неверно. Показывает «было → станет»; поле меняется, только когда человек нажмёт «Принять».",
             "parameters": [
                 "type": "object",
                 "properties": [
                     "document_id": ["type": "string", "description": "id документа, например d42"],
                     "key": ["type": "string", "enum": fieldKeys],
-                    "value": ["type": "string", "description": "Правильное значение целиком: ФИО полностью, дата ДД.ММ.ГГГГ"],
+                    "value": ["type": "string", "description": "Правильное значение: ФИО полностью или одно исправленное слово (фамилия); дата ДД.ММ.ГГГГ"],
                 ],
                 "required": ["document_id", "key", "value"],
             ],
         ],
         [
             "name": "propose_file_actions",
-            "description": "Предложить действия с файлами. Ничего не меняется, пока человек не нажмёт «Выполнить» на карточке.",
+            "description": "Предложить действия с файлами. Ничего не меняется, пока человек не нажмёт «Принять» на карточке.",
             "parameters": [
                 "type": "object",
                 "properties": [

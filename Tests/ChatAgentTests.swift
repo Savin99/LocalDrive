@@ -244,9 +244,47 @@ final class ChatAgentTests: XCTestCase {
         ])
         let session = ChatSession(search: search, agentModel: { agent })
 
-        session.send("там с фамилией что-то не так, проверь")
+        session.send("с фамилией какая-то беда, проверь")
         let answer = try await reply(of: session)
         XCTAssertEqual(answer.cards.map(\.card), [.fieldFix(documentID: russian.id, key: FieldKey.fullName, value: "Савельев Илья Андреевич")])
+    }
+
+    /// Агент спросил — короткий ответ уходит ему же, а не правилам. Владелец
+    /// 25.10.2026: на «Трошкина» после «пришлите, как правильно» правила
+    /// показали другой документ, где тоже есть это имя
+    func testReplyToAgentQuestionGoesBackToAgent() async throws {
+        try await indexPassports()
+        let russian = try await document(.passportRU)
+        let agent = ScriptedAgent([
+            AgentTurn(text: "Пришлите, как правильно пишется фамилия."),
+            AgentTurn(calls: [.call("propose_field_fix", #"{"document_id": "d\#(russian.id)", "key": "full_name", "value": "Савельев"}"#)]),
+        ])
+        let session = ChatSession(search: search, agentModel: { agent })
+
+        session.send("с фамилией какая-то беда")
+        _ = try await reply(of: session)
+        session.send("Савельев")
+        let answer = try await reply(of: session)
+
+        let begun = await agent.begun
+        XCTAssertEqual(begun.map(\.question), ["с фамилией какая-то беда", "Савельев"])
+        XCTAssertEqual(answer.cards.map(\.card), [.fieldFix(documentID: russian.id, key: FieldKey.fullName, value: "Савельев Илья Андреевич")])
+    }
+
+    /// После вопроса агента самостоятельный вопрос — снова правилам, сразу
+    func testOwnQuestionAfterAgentQuestionStaysWithRules() async throws {
+        try await indexPassports()
+        let agent = ScriptedAgent([AgentTurn(text: "Что именно показать?")])
+        let session = ChatSession(search: search, agentModel: { agent })
+
+        session.send(freeQuestion)
+        _ = try await reply(of: session)
+        session.send("дата рождения в загранпаспорте")
+        let answer = try await reply(of: session)
+
+        let begun = await agent.begun
+        XCTAssertEqual(begun.count, 1, "точный вопрос ушёл модели")
+        XCTAssertTrue(answer.cards.contains { if case .fields = $0.card { true } else { false } }, answer.text)
     }
 
     func testNewChatResetsAgentConversation() async throws {

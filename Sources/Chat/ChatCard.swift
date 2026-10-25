@@ -35,7 +35,7 @@ enum ChatCard: Hashable, Sendable {
     /// Черновик карточки: в «Карточки» попадает по «Сохранить»
     case factProposal(FactCard)
     /// Исправление поля, которое распознавание прочитало неверно: меняется
-    /// только по кнопке «Исправить»
+    /// только по кнопке «Принять»
     case fieldFix(documentID: Int64, key: String, value: String)
 
     var documentIDs: [Int64] {

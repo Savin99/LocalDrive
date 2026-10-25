@@ -16,7 +16,7 @@ struct GenUIChatHooks {
 /// Действия интерфейса одного сообщения чата (docs/genui.md, «Действия»).
 /// Локальные `set` и `reset` выполняет движок, остальное — здесь. Меняющее
 /// данные — с подтверждением: напоминание — вопросом, файловые действия —
-/// карточкой предложения, которую выполняет только «Выполнить»
+/// карточкой предложения, которую выполняет только «Принять»
 @MainActor
 final class GenUIChatPerformer: GenUIActionPerformer {
     /// Куда идут вопросы к модели и карточки: сессия чата
@@ -90,7 +90,7 @@ final class GenUIChatPerformer: GenUIActionPerformer {
         case .proposeFileActions(let arguments):
             do {
                 await target.addCard(try target.proposal(arguments))
-                return .done("Предложение — ниже: ничего не изменится без «Выполнить»")
+                return .done("Предложение — ниже: ничего не изменится без «Принять»")
             } catch {
                 return .failed("Предложение не собралось")
             }

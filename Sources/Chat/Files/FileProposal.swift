@@ -14,7 +14,7 @@ struct FileRef: Hashable, Codable, Sendable {
 }
 
 /// Предложение разложить файлы. Его составляет модель или подсказка без сети,
-/// а выполняет человек кнопкой «Выполнить» — до неё в хранилище ничего не меняется
+/// а выполняет человек кнопкой «Принять» — до неё в хранилище ничего не меняется
 struct FileProposal: Identifiable, Hashable, Codable, Sendable {
     enum Action: Hashable, Codable, Sendable {
         /// Вложение чата — в папку; `name` — новое имя с расширением, nil — исходное
@@ -393,7 +393,7 @@ enum FileProposalExecutor {
             case .new(let name):
                 let key = name.lowercased()
                 if let folder = created[key] { return folder }
-                // Родитель за время до «Выполнить» мог пропасть или скрыться —
+                // Родитель за время до «Принять» мог пропасть или скрыться —
                 // тогда папку не создаём: на верхнем уровне её не ждут
                 var parent: VaultFolder?
                 if let parentID = proposal.parent(ofNewFolder: name) {

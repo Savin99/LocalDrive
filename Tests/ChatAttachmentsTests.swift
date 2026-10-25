@@ -5,7 +5,7 @@ import XCTest
 
 // Вложения чата и предложения разложить файлы. Владелец 12.10.2026: «можно в
 // чат кидать, и она будет предлагать, куда положить, сортировать». Модель
-// составляет предложение, человек жмёт «Выполнить» — до этого хранилище не
+// составляет предложение, человек жмёт «Принять» — до этого хранилище не
 // меняется, а суперскрытые папки модели недоступны вовсе
 @MainActor
 final class ChatAttachmentsTests: XCTestCase {
@@ -390,7 +390,7 @@ final class ChatAttachmentsTests: XCTestCase {
             return XCTFail("ждали предложение, пришло \(String(describing: session.messages.last?.cards.map(\.card)))")
         }
         XCTAssertEqual(proposal.actions, [.saveAttachment(attachmentID: lease.id, folder: .existing(contracts.id), name: nil)])
-        XCTAssertTrue(store.files(in: contracts).isEmpty, "до «Выполнить» ничего не сохранено")
+        XCTAssertTrue(store.files(in: contracts).isEmpty, "до «Принять» ничего не сохранено")
     }
 
     func testNewChatClearsAttachments() async throws {

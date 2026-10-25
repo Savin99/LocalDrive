@@ -4,7 +4,7 @@ import Foundation
 /// Трошкина», «фамилия не Трошина, а Трошкина», «номер должен быть 4601
 /// 123457» — просьба поправить поле, которое распознавание прочитало неверно.
 /// Владелец 24.10.2026: «в фамилии ошибка — говорю в чате, он не исправляет».
-/// Чат только предлагает: поле меняется по кнопке «Исправить» и становится
+/// Чат только предлагает: поле меняется по кнопке «Принять» и становится
 /// ручным — повторное распознавание его не перезапишет
 struct ChatFieldFix: Equatable {
     /// Ключ поля (FieldKey); nil — поле не названо
@@ -28,7 +28,23 @@ struct ChatFieldFix: Equatable {
             case .patronymic: "Отчество"
             }
         }
+
+        /// «Напишите правильную фамилию»
+        var wanted: String {
+            switch self {
+            case .surname: "правильную фамилию"
+            case .given: "правильное имя"
+            case .patronymic: "правильное отчество"
+            }
+        }
     }
+
+    /// Слова-связки в ответе на «как правильно?»: «фамилия Трошкина», «вот
+    /// так: Трошкина», «пишется Трошкина» — значение после них
+    static let fillers: Set<String> = [
+        "фамилия", "фамилию", "имя", "отчество", "правильно", "правильная", "правильное", "правильный", "это", "вот",
+        "так", "пишется", "пиши", "напиши", "надо", "нужно", "на", "должно", "должна", "быть", "она", "он", "её", "ее",
+    ]
 
     /// Слова, по которым понятно, что речь об ошибке, а не о вопросе
     static let markers = [
@@ -39,12 +55,20 @@ struct ChatFieldFix: Equatable {
         "на самом деле",
     ]
 
+    /// «Фамилия не так написана», «имя не то» — поправка, только если поле
+    /// названо: «что-то не так» само по себе — не о поле
+    static let wrongWords = ["не так", "не та", "не то", "не тот"]
+
+    private static func namesField(_ words: Set<String>) -> Bool {
+        words.contains { $0.hasPrefix("фамили") || $0.hasPrefix("отчеств") } || words.contains("имя") || words.contains("имени")
+    }
+
     init?(_ text: String) {
         let lower = text.lowercased().replacingOccurrences(of: "ё", with: "е")
         let words = Set(SearchText.tokens(in: lower).map(\.word))
         let marked = Self.markers.contains { marker in
             marker.contains(" ") ? lower.contains(marker) : words.contains(marker)
-        }
+        } || (Self.namesField(words) && Self.wrongWords.contains { lower.range(of: "(^|\\s)\($0)([\\s,.!?]|$)", options: .regularExpression) != nil })
         // «Не Трошина, а Трошкина» — само по себе поправка
         let notBut = Self.capture(#"(?i)(?:^|\s)не\s+([^,]+?),?\s+а\s+(.+?)\s*$"#, in: text)
         guard marked || notBut != nil else { return nil }
@@ -95,7 +119,12 @@ struct ChatFieldFix: Equatable {
     init(key: String, namePart: NamePart?, answer: String) {
         self.key = key
         self.namePart = namePart
-        let cleaned = Self.clean(answer)
+        // Связки впереди — не значение: «фамилия Трошкина» → «Трошкина»
+        var words = Self.clean(answer).split(whereSeparator: { $0 == " " || $0 == ":" || $0 == "—" }).map(String.init)
+        while words.count > 1, let first = words.first, Self.fillers.contains(Self.clean(first).lowercased()) {
+            words.removeFirst()
+        }
+        let cleaned = Self.clean(words.joined(separator: " "))
         value = Self.isDate(key) ? (Self.normalizedDate(cleaned) ?? cleaned) : cleaned
     }
 
@@ -105,12 +134,19 @@ struct ChatFieldFix: Equatable {
         if let replacing, let current, current.localizedCaseInsensitiveContains(replacing) {
             return current.replacingOccurrences(of: replacing, with: value, options: [.caseInsensitive])
         }
-        guard key == FieldKey.fullName, let namePart, let current else { return value }
+        guard key == FieldKey.fullName, let current else { return value }
         var parts = current.split(separator: " ").map(String.init)
-        // Назвали ФИО целиком — оно и есть новое значение
-        if value.split(separator: " ").count >= 2 { return value }
+        var word = value
+        let words = value.split(separator: " ").map(String.init)
+        if words.count >= 2 {
+            // «Иванчук Анна» о фамилии: новое слово одно — оно и есть фамилия
+            let fresh = words.filter { word in !parts.contains { $0.caseInsensitiveCompare(word) == .orderedSame } }
+            guard namePart != nil, fresh.count == 1 else { return Self.correctedName(value, current: current) }
+            word = fresh[0]
+        }
+        guard let namePart else { return value }
         while parts.count <= namePart.rawValue { parts.append("") }
-        parts[namePart.rawValue] = value.prefix(1).uppercased() + value.dropFirst()
+        parts[namePart.rawValue] = word.prefix(1).uppercased() + word.dropFirst()
         return parts.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
@@ -150,7 +186,7 @@ struct ChatFieldFix: Equatable {
         let rest = known.indices.filter { index in !words.contains { $0.caseInsensitiveCompare(known[index]) == .orderedSame } }
         let distances = rest.map { ($0, ChatRouter.editDistance(word.lowercased(), known[$0].lowercased())) }
         guard let (index, distance) = distances.min(by: { $0.1 < $1.1 }),
-              distance <= max(2, known[index].count / 3) else { return value }
+              distance <= max(2, known[index].count / 2) else { return value }
         known[index] = word
         return known.joined(separator: " ")
     }

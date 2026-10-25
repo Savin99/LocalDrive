@@ -201,6 +201,11 @@ final class ChatSession {
     @ObservationIgnored private(set) var facts: FactStore?
     /// Чат спросил «как правильно?»: следующий ответ — новое значение поля
     @ObservationIgnored private var pendingFix: (documentID: Int64, key: String, namePart: ChatFieldFix.NamePart?)?
+    /// Последний ответ облака или агента на iPhone кончился вопросом («Как
+    /// правильно пишется фамилия?»): короткий ответ человека — им же, с их
+    /// контекстом. Правила приняли бы «Трошкина» за имя и показали другой
+    /// документ, где есть Ольга Трошина (владелец 25.10.2026)
+    @ObservationIgnored private var agentAskedQuestion = false
     /// Что разбор прочитал во вложениях: вид и поля. По ним чат отвечает на
     /// «какой день рождения у этого человека», пока файл не разложен по папкам
     /// и в базе его нет. Только в памяти, как и переписка
@@ -273,6 +278,10 @@ final class ChatSession {
         // Выключенный облачный чат — не сбой: чип и так показывает «iPhone»
         let wantsCloud = documentID == nil && cloud.chatAvailable && cloud.chatModel != .local
         let configuration = wantsCloud ? cloud.chatConfiguration : nil
+        // Ответ на вопрос облака или агента: правила его не перехватывают
+        let answersAgent = agentAskedQuestion && documentID == nil && ChatIntent(trimmed).isBareReply
+            && (configuration != nil || model != nil)
+        agentAskedQuestion = false
 
         cloudTask = Task {
             let steps = self.stepSink(for: pending.id)
@@ -309,7 +318,7 @@ final class ChatSession {
                 return
             }
             // «В фамилии ошибка», «исправь дату рождения на 12.05.1985» —
-            // карточка «было → станет» с кнопкой «Исправить»
+            // карточка «было → станет» с «Принять» и «Отклонить»
             if documentID == nil, attachments.isEmpty, let reply = await self.fieldFixReply(trimmed, context: context, steps: steps) {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
@@ -325,7 +334,7 @@ final class ChatSession {
             // показывается сразу. Владелец 24.10.2026: такой вопрос думал
             // больше 30 с. «Подумать» и вложения — всегда облако
             var rules: (ChatReply, [Int64: SearchResult])?
-            if attachments.isEmpty, configuration?.reasoning != .deep {
+            if attachments.isEmpty, configuration?.reasoning != .deep, !answersAgent {
                 var router = ChatRouter(search: search)
                 router.onStep = steps
                 router.facts = facts
@@ -499,6 +508,15 @@ final class ChatSession {
 
     static let cloudNotice = "Облако недоступно — отвечаю без него"
 
+    /// Агент спросил или попросил что-то прислать — человек ответит ему же.
+    /// Владелец слышал «пришлите, как правильно пишется фамилия» — без «?»
+    static func asksQuestion(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("?") || askVerbs.contains { lower.contains($0) }
+    }
+
+    private static let askVerbs = ["напишите", "пришлите", "уточните", "подскажите", "укажите", "скажите", "назовите", "выберите"]
+
     /// Правила уверены: нашли один личный документ и показывают его поля или
     /// сам документ — без вопроса «какой?» и без поиска по тексту. Чип «Ещё
     /// есть:» под ответом не делает ответ неуверенным, развороты паспорта — один
@@ -541,7 +559,24 @@ final class ChatSession {
     static func summary(of cards: [ChatCard]) -> String {
         var seen = Set<Int64>()
         let ids = cards.flatMap(\.documentIDs).filter { seen.insert($0).inserted }.map(ChatCard.encodeID)
-        return ids.isEmpty ? "Ответил без облака." : "Ответил без облака и показал карточки документов: \(ids.joined(separator: ", "))."
+        var parts = ids.isEmpty ? [] : ["показал карточки документов: \(ids.joined(separator: ", "))"]
+        // Что предложено: агент продолжит с того же места («и имя тоже»)
+        for card in cards {
+            switch card {
+            case .fieldFix(let id, let key, let value):
+                let shown = FieldKey.isSensitive(key) ? FieldMask.masked(value) : value
+                parts.append("предложил исправить «\(FieldKey.title(key))» в \(ChatCard.encodeID(id)) на «\(shown)» — человек примет или отклонит кнопкой")
+            case .proposal(let proposal):
+                parts.append("предложил «\(proposal.summary)» — человек примет или отклонит кнопкой")
+            case .factProposal(let fact):
+                parts.append("предложил карточку «\(fact.title)» — человек сохранит кнопкой")
+            case .clarify(let question, let options):
+                parts.append("спросил \(question.map { "«\($0)»" } ?? "какой документ"): " + options.map(\.title).joined(separator: ", "))
+            default:
+                break
+            }
+        }
+        return parts.isEmpty ? "Ответил без облака." : "Ответил без облака: " + parts.joined(separator: "; ") + "."
     }
 
     /// Пометка над ответом правилами — настоящая причина, а не «недоступно»
@@ -575,6 +610,8 @@ final class ChatSession {
         if let model = agentModel() { Task { await model.resetAgent() } }
         messages.removeAll()
         attachmentReadings.removeAll()
+        pendingFix = nil
+        agentAskedQuestion = false
         revealsSensitive = false
         cloudEngine?.reset()
         // Временные копии вложений стираются вместе с перепиской
@@ -673,11 +710,19 @@ final class ChatSession {
     private func fieldFixReply(_ text: String, context: [Int64], steps: @escaping ChatStepSink) async -> ChatReply? {
         var fix: ChatFieldFix
         var documentID: Int64?
-        if let pending = pendingFix, ChatFieldFix(text) == nil, ChatIntent(text).types.isEmpty, text.count <= 80 {
-            // Ответ на «как правильно?» — само значение
+        let parsed = ChatFieldFix(text)
+        if let pending = pendingFix, parsed == nil, ChatIntent(text).types.isEmpty, text.count <= 80 {
+            // Ответ на «как правильно?» — само значение: «Трошкина», «фамилия Трошкина»
             fix = ChatFieldFix(key: pending.key, namePart: pending.namePart, answer: text)
             documentID = pending.documentID
-        } else if let parsed = ChatFieldFix(text) {
+        } else if let pending = pendingFix, var parsed, parsed.value != nil,
+                  parsed.key == nil || parsed.key == pending.key, ChatIntent(text).types.isEmpty {
+            // «Правильно Трошкина», «должно быть Трошкина» — та же поправка
+            parsed.key = pending.key
+            if parsed.namePart == nil { parsed.namePart = pending.namePart }
+            fix = parsed
+            documentID = pending.documentID
+        } else if let parsed {
             fix = parsed
         } else {
             pendingFix = nil
@@ -705,14 +750,14 @@ final class ChatSession {
         let shown = current.map { FieldKey.isSensitive(key) ? FieldMask.masked($0) : $0 }
         guard let value = fix.resolvedValue(current: current) else {
             pendingFix = (documentID, key, fix.namePart)
-            let part = fix.namePart?.title ?? FieldKey.title(key)
-            return ChatReply(text: "Как правильно? Напишите \(part.lowercased()) — покажу, что изменится." + (shown.map { " Сейчас: «\($0)»." } ?? ""),
+            let wanted = fix.namePart?.wanted ?? "правильное значение поля «\(FieldKey.title(key))»"
+            return ChatReply(text: "Как правильно? Напишите \(wanted) — покажу, что было и что станет." + (shown.map { " Сейчас: «\($0)»." } ?? ""),
                              cards: [.document(documentID: documentID)], isConfident: true)
         }
         guard value != current else {
             return ChatReply(text: "Так и записано: «\(shown ?? value)».", cards: [], isConfident: true)
         }
-        return ChatReply(text: "Проверьте и нажмите «Исправить». Поле станет ручным — повторное распознавание его не перезапишет:",
+        return ChatReply(text: "Было → станет. Примите или отклоните — после «Принять» повторное распознавание поле не перезапишет:",
                          cards: [.fieldFix(documentID: documentID, key: key, value: value)], isConfident: true)
     }
 
@@ -790,7 +835,7 @@ final class ChatSession {
         guard !found.isEmpty else {
             let asked = keys.map { "«\(FieldKey.title($0))»" }.joined(separator: ", ")
             let deeper = search.cloud.isEnabled && search.cloud.hasKey ? " — там его прочитает облако" : " — там его прочитают внимательнее"
-            return ChatReply(text: "На вложении \(source) не разобрал \(asked). Положите файл в папку кнопкой «Выполнить» выше\(deeper).",
+            return ChatReply(text: "На вложении \(source) не разобрал \(asked). Положите файл в папку кнопкой «Принять» выше\(deeper).",
                              cards: [], isConfident: true)
         }
         // Номер — маской, как в карточке: значения здесь — текст, а не карточка
@@ -800,14 +845,14 @@ final class ChatSession {
         }
         return ChatReply(
             text: "По вложению \(source):\n" + lines.joined(separator: "\n")
-                + (footer ? "\n\nЧтобы данные были под рукой всегда, положите файл в папку — «Выполнить» выше." : ""),
+                + (footer ? "\n\nЧтобы данные были под рукой всегда, положите файл в папку — «Принять» выше." : ""),
             cards: [], isConfident: true
         )
     }
 
     // MARK: - Просьбы разложить файлы
 
-    static let proposalLead = "Предлагаю так. Ничего не изменится, пока вы не нажмёте «Выполнить»:"
+    static let proposalLead = "Предлагаю так. Ничего не изменится, пока вы не нажмёте «Принять»:"
 
     /// «Ищу папку «Семья»» или «Папки «Семья» нет — создам»
     static func folderStep(_ command: ChatFileCommand, target: FolderTarget, store: VaultStore) -> String {
@@ -902,7 +947,9 @@ final class ChatSession {
             // Ответ интерфейсом: JSON проверяется целиком. Ход, кончившийся
             // одними карточками, интерфейса не показывает
             interface.feed?.finish()
-            let model = interface.feed?.hasContent == true ? interface.feed?.model : nil
+            // Интерфейс без текста и блоков — пустой пузырь: его не показываем
+            let feedModel = interface.feed?.hasContent == true ? interface.feed?.model : nil
+            let model = feedModel.flatMap { $0.blocks.isEmpty && $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
             messages[index].genui = model
             if model == nil { messages[index].genuiPerformer = nil }
             let answer = model?.text ?? (interface.isGenUI ? "" : reply.text)
@@ -911,6 +958,7 @@ final class ChatSession {
             messages[index].thoughts = reply.thoughts
             messages[index].thinkingSeconds = reply.thinkingSeconds
             messages[index].isPending = false
+            agentAskedQuestion = Self.asksQuestion(answer)
             return (true, nil)
         } catch {
             guard let index = messages.firstIndex(where: { $0.id == pending }) else { return (true, nil) }
@@ -1123,6 +1171,7 @@ final class ChatSession {
             messages[index].text = reply.text
             messages[index].cards = cards
             messages[index].isPending = false
+            agentAskedQuestion = Self.asksQuestion(reply.text)
             return true
         } catch {
             steps(.think, error is CloudChatTimeout ? "Модель не успела — отвечаю по базе" : "Модель сбилась — отвечаю по базе")

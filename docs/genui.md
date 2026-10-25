@@ -216,7 +216,7 @@ protocol GenUIDataProvider: Sendable {
 | `copy_field {document_id, key}` | копировать поле, номер — целиком, без Face ID (24.10.2026) | — |
 | `open_folder {folder_id}` | перейти в папку | — |
 | `remind {document_id}` | напоминание о сроке | да |
-| `propose_file_actions {summary, actions: [{kind: save_attachment\|move_files\|rename_file\|create_folder, …}]}` | карточка-предложение файловых действий | выполняет только кнопка «Выполнить» |
+| `propose_file_actions {summary, actions: [{kind: save_attachment\|move_files\|rename_file\|create_folder, …}]}` | карточка-предложение файловых действий | выполняет только кнопка «Принять» |
 
 Ссылок, HTML, скриптов, произвольных URL и системных действий нет.
 Неизвестное действие при проверке отбрасывается вместе с кнопкой.
@@ -371,7 +371,7 @@ xcodebuild передаёт в тест переменные с приставк
   `show_fields` — карточка под ответом; `copy_field` — номер целиком;
   `open_folder` — документы папки карточкой; `remind` — с подтверждением
   диалогом; `propose_file_actions` — карточка предложения FileProposalBuilder,
-  выполняет только «Выполнить»; `regenerate` — модель перестраивает блок по
+  выполняет только «Принять»; `regenerate` — модель перестраивает блок по
   его JSON и значениям состояния, ход в историю не попадает.
 - **Экран.** `MessageRow` показывает `GenUIMessageView`: блоки появляются по
   мере прихода, `app_card` — карточкой каталога (`GenUIAppCardView`).

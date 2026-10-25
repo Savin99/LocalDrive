@@ -466,6 +466,150 @@ final class GenUILiveEvalTests: XCTestCase {
         add(attachment)
     }
 
+    /// Разговоры владельца целиком — через ChatSession, как на iPhone: правила,
+    /// облако и общий у них контекст, каждый разговор в новом чате. Владелец
+    /// 25.10.2026: «паспорт Ольги» → «фамилия неправильно» → чат попросил
+    /// прислать, как правильно → на «Трошкина» показал свидетельство о браке,
+    /// где тоже Ольга Трошина. Ловушка — то же свидетельство в хранилище
+    func testOwnerDialogsOnRealModel() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let key = environment["OPENAI_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+            throw XCTSkip("Нет OPENAI_API_KEY — живая проверка пропущена")
+        }
+        let runs = max(1, Int(environment["GENUI_EVAL_RUNS"] ?? "") ?? 3)
+        let suite = "GenUIEval-\(UUID().uuidString)"
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: suite) }
+        let cloud = CloudRecognitionStore(defaults: UserDefaults(suiteName: suite)!, keychainService: "eval.\(UUID().uuidString)")
+        cloud.useSessionKey(key)
+        cloud.setChatEnabled(true)
+        let (search, _, _) = try await ownersVault(cloud: cloud)
+        let olgaFolder = try XCTUnwrap(store.folders.first { $0.name == "Ольга" })
+        let ilyaFolder = try XCTUnwrap(store.folders.first { $0.name == "Илья" })
+        StubURLProtocol.reset(Self.page(meta: Self.meta(title: "Свидетельство о браке", category: "identity", kind: "свидетельство",
+                                                        date: "12.06.2015", until: "")))
+        store.importData(Data("СВИДЕТЕЛЬСТВО О ЗАКЛЮЧЕНИИ БРАКА\nСавин Илья Андреевич и Трошина Ольга Петровна заключили брак 12.06.2015".utf8),
+                         preferredName: "свидетельство о браке.txt", to: olgaFolder)
+        search.reconcile()
+        await search.waitUntilIdle()
+        let passports = await search.documents(ofTypes: [.passportRU])
+        let olga = try XCTUnwrap(passports.first { $0.fileName == "паспорт Ольги.txt" }?.id)
+        let factsRoot = root.appendingPathComponent("facts-\(UUID().uuidString)", isDirectory: true)
+
+        typealias Check = ([ChatSession.Message]) -> Bool
+        func fix(_ key: String, _ accepts: @escaping (String) -> Bool) -> Check {
+            { replies in
+                replies.contains { message in
+                    message.cards.contains { card in
+                        if case .fieldFix(let id, let fixKey, let value) = card.card { return id == olga && fixKey == key && accepts(value) }
+                        return false
+                    }
+                }
+            }
+        }
+        let troshkina = fix(FieldKey.fullName) { $0 == "Трошкина Ольга Петровна" }
+        let dialogs: [(name: String, turns: [String], check: Check)] = [
+            ("D1 паспорт → «фамилия неправильно» → «Трошкина»", ["паспорт Ольги", "фамилия неправильно", "Трошкина"], troshkina),
+            ("D2 … «там фамилия неправильно написана» → «правильно Трошкина»",
+             ["паспорт Ольги", "там фамилия неправильно написана", "правильно Трошкина"], troshkina),
+            ("D3 … «фамилия не так написана» → «Трошкина»", ["паспорт Ольги", "фамилия не так написана", "Трошкина"], troshkina),
+            ("D4 … «в фамилии опечатка, должна быть Трошкина»", ["паспорт Ольги", "в фамилии опечатка, должна быть Трошкина"], troshkina),
+            ("D5 … «дата рождения неправильная, правильно 03.02.1992»",
+             ["паспорт Ольги", "дата рождения неправильная, правильно 03.02.1992"], fix(FieldKey.birthDate) { $0 == "03.02.1992" }),
+            ("D6 … «у неё фамилия Трошкина, а не Трошина»", ["открой паспорт Ольги", "у неё фамилия Трошкина, а не Трошина"], troshkina),
+            ("D7 «фамилия у Ольги в паспорте неправильная» → «Трошкина»",
+             ["фамилия у Ольги в паспорте неправильная", "Трошкина"], troshkina),
+            ("D8 … «и отчество неправильное — Павловна» после фамилии",
+             ["паспорт Ольги", "фамилия неправильно", "Трошкина", "и отчество неправильное — Павловна"],
+             fix(FieldKey.fullName) { $0.hasPrefix("Трош") && $0.hasSuffix("Ольга Павловна") }),
+            ("D9 … «перенеси его в папку Илья»", ["паспорт Ольги", "перенеси его в папку Илья"], { replies in
+                replies.contains { message in
+                    message.cards.contains { card in
+                        guard case .proposal(let proposal) = card.card else { return false }
+                        return proposal.actions.contains { action in
+                            if case .moveFiles(let files, .existing(let folder)) = action {
+                                return folder == ilyaFolder.id && files.contains { $0.name == "паспорт Ольги.txt" }
+                            }
+                            return false
+                        }
+                    }
+                }
+            }),
+            ("D10 «свидетельство о браке» → «кто в нём указан?»", ["свидетельство о браке", "кто в нём указан?"], { replies in
+                let text = replies.last?.text ?? ""
+                return text.contains("Савин") && text.contains("Трошин")
+            }),
+            ("D11 «запомни: у Камилы домофон 45К1234, этаж 3»", ["запомни: у Камилы домофон 45К1234, этаж 3"], { replies in
+                replies.contains { message in
+                    message.cards.contains { card in
+                        if case .factProposal(let fact) = card.card { return fact.items.count >= 2 }
+                        return false
+                    }
+                }
+            }),
+            ("D12 «мой паспорт» → «Ольги»", ["мой паспорт", "Ольги"], { replies in
+                replies.last?.cards.contains { $0.card.documentIDs.contains(olga) } == true
+            }),
+            ("D13 «где лежит паспорт Ольги?»", ["где лежит паспорт Ольги?"], { replies in
+                let last = replies.last
+                return last?.text.contains("Ольга") == true || last?.cards.contains { $0.card.documentIDs.contains(olga) } == true
+            }),
+        ]
+        var steps = dialogs.map { Step(name: $0.name) }
+        func finish(_ session: ChatSession) async throws {
+            for _ in 0..<6000 where session.isAnswering { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        func describe(_ message: ChatSession.Message) -> String {
+            let cards = message.cards.map { "\($0.card)".prefix(60) }.joined(separator: ", ")
+            // Ответ интерфейсом: какие блоки нарисовала модель вместо карточек
+            let blocks = message.genui?.blocks.flatMap(\.flattened).map { "\($0.raw)".prefix(80) }.joined(separator: "; ") ?? ""
+            // Пустой ответ — что пришло на самом деле
+            let raw = message.text.trimmingCharacters(in: .whitespaces).isEmpty && cards.isEmpty && blocks.isEmpty
+                ? " raw{genui: \(message.genui.map { String("\($0.text) / \($0.blocks.count) блоков / \($0.mode)".prefix(200)) } ?? "nil"); notice: \(message.notice ?? "-"); thoughts: \(message.thoughts.prefix(200))}"
+                : ""
+            return "«\(message.text.prefix(70))»" + (cards.isEmpty ? "" : " [\(cards)]") + (blocks.isEmpty ? "" : " genui{\(blocks)}") + raw
+        }
+        // TEST_RUNNER_DIALOGS=D3,D11 — только эти разговоры
+        let only = environment["DIALOGS"].map { Set($0.split(separator: ",").map(String.init)) }
+
+        for _ in 1...runs {
+            for (index, dialog) in dialogs.enumerated() {
+                if let only, !only.contains(String(dialog.name.prefix { $0 != " " })) { continue }
+                search.owner.clear()
+                let session = ChatSession(search: search, cloudSession: .shared)
+                session.useFiles(store)
+                session.useFacts(FactStore(rootURL: factsRoot.appendingPathComponent(UUID().uuidString)))
+                let started = Date()
+                var transcript: [String] = []
+                var replies: [ChatSession.Message] = []
+                for turn in dialog.turns {
+                    session.send(turn)
+                    try await finish(session)
+                    guard let reply = session.messages.last, reply.role == .assistant else { continue }
+                    replies.append(reply)
+                    transcript.append("\(turn) → \(describe(reply))")
+                }
+                // Проверяется ответ на последнюю реплику: прежние — только путь к ней
+                let passed = dialog.check(Array(replies.suffix(1)))
+                steps[index].runs += 1
+                steps[index].seconds += Date().timeIntervalSince(started)
+                if passed { steps[index].passed += 1 } else { steps[index].misses.insert(transcript.joined(separator: " ⟶ ")) }
+            }
+        }
+
+        var lines = ["# Разговоры владельца — gpt-6-luna через ChatSession, прогонов: \(runs)", "",
+                     "| Разговор | Успешно | Время, с | Промах |", "| --- | --- | --- | --- |"]
+        for step in steps where step.runs > 0 {
+            lines.append("| \(step.name) | \(step.passed)/\(step.runs) | \(String(format: "%.1f", step.seconds / Double(max(1, step.runs)))) | "
+                + (step.misses.sorted().first?.replacingOccurrences(of: "|", with: "/").replacingOccurrences(of: "\n", with: " ") ?? "—") + " |")
+        }
+        let attachment = XCTAttachment(string: lines.joined(separator: "\n"))
+        attachment.name = "owner-dialogs.md"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let weak = steps.filter { $0.runs > 0 && $0.passed * 3 < $0.runs * 2 }
+        XCTAssertTrue(weak.isEmpty, "Меньше 2/3: " + weak.map(\.name).joined(separator: "; "))
+    }
+
     /// Паспорта Савина и Трошиной и страница прописки Савина
     private func ownersVault(cloud: CloudRecognitionStore) async throws -> (SearchService, savin: Int64, registration: Int64) {
         let reader = CloudDocumentReader(

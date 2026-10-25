@@ -48,7 +48,7 @@ struct FilePlacementAdvisor {
         )
         // Строки действий — в карточке, текст ответа их не повторяет
         let lead = recognized.isEmpty ? "" : "Это " + recognized.joined(separator: ", ") + ". Спрашивайте по нему — отвечу.\n"
-        let text = lead + "Предлагаю так. Ничего не изменится, пока вы не нажмёте «Выполнить»:"
+        let text = lead + "Предлагаю так. Ничего не изменится, пока вы не нажмёте «Принять»:"
         return ChatReply(text: text, cards: [.proposal(proposal)])
     }
 

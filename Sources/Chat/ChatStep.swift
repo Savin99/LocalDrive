@@ -74,4 +74,11 @@ extension ChatIntent {
         if !name.isEmpty { parts.append(name) }
         return parts.joined(separator: " · ")
     }
+
+    /// «Трошкина», «Ольги», «да, второй» — ответ на вопрос, а не новый вопрос:
+    /// ни документа, ни поля, ни просьбы, несколько слов
+    var isBareReply: Bool {
+        types.isEmpty && fieldKeys.isEmpty && !wantsExpiry && !wantsList && !wantsAddress && !wantsAllFields
+            && !wantsFile && nameWords.count <= 4
+    }
 }

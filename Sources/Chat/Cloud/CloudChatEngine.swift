@@ -187,6 +187,12 @@ final class CloudChatEngine {
     /// лишний раунд за финальным текстом не нужен
     static let terminalTools: Set<String> = ["show_cards", "propose_file_actions", "show_fact_card", "propose_fact_card", "propose_field_fix"]
 
+    static let emptyAnswerNudge = "Ответ получился пустым. Сделай то, о чём я просил: вызови нужный инструмент или ответь текстом."
+
+    static func isCyrillic(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { (0x0400...0x04FF).contains($0.value) }
+    }
+
     /// Опись документов для системной инструкции: id, вид, название, владелец,
     /// папка — без номеров. Стабильный префикс запроса: на нём работает кэш
     var documentIndex = ""
@@ -325,6 +331,7 @@ final class CloudChatEngine {
             return CloudChatReply(text: usesGenUI ? text : tools.mask(text), cards: round.cards, thoughts: tools.mask(round.thoughts), thinkingSeconds: thinkingSeconds)
         }
 
+        var nudged = false
         for _ in 0..<Self.maxRounds {
             rounds += 1
             round.answer = ""
@@ -363,6 +370,14 @@ final class CloudChatEngine {
                 }
             }
             items = dialect.appending(turn: turn, to: items)
+            // Пустой ответ без карточек — модель потеряла нить: ещё один раунд
+            // с подсказкой. Живая проверка 25.10.2026: «запомни: …» — пустой
+            // ответ в 1 из 5. Ответ по-русски без единой буквы кириллицы — пустой
+            if turn.calls.isEmpty, !nudged, round.cards.isEmpty, !round.answer.contains(where: Self.isCyrillic) {
+                nudged = true
+                items = dialect.appending(user: Self.emptyAnswerNudge, attachments: [], level: level, to: items, state: &state)
+                continue
+            }
             guard !turn.calls.isEmpty else { return finish(round.answer) }
 
             var results: [(call: CloudChatCall, result: CloudJSON)] = []
@@ -414,7 +429,8 @@ final class CloudChatEngine {
         let ownerLine = owner.map { "Владелец хранилища: \($0). «Мой», «моя», «мне» — о его документах." }
             ?? "Владелец хранилища неизвестен. На «мой паспорт», «мои документы» при документах нескольких людей не угадывай — спроси, чей, вариантами с именами."
         let base = (genUI ? CloudChatGenUI.system : CloudChatPrompt.system) + "\n" + ownerLine + "\n" + CloudChatFactTools.instruction
-        var prompt = index.isEmpty ? base : base + "\n\nДокументы хранилища (id · вид · название · владелец · папка · срок, если записан):\n" + index
+        let lines = index.split(separator: "\n").map { LocalAgentPrompt.labeled(String($0), withType: true) }
+        var prompt = lines.isEmpty ? base : base + "\n\nДокументы хранилища:\n" + lines.joined(separator: "\n")
         if !facts.isEmpty { prompt += "\n\nКарточки (id · название · поля):\n" + facts }
         return prompt
     }

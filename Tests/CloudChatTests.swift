@@ -359,7 +359,7 @@ final class CloudChatTests: XCTestCase {
         XCTAssertNil(json["instructions"], "инструкция — сообщением developer: там её можно отметить для кэша")
         let instructions = try XCTUnwrap(self.instructions(json))
         XCTAssertTrue(instructions.hasPrefix(CloudChatPrompt.system))
-        XCTAssertTrue(instructions.contains("d1 · passport_ru · Паспорт · Савин И. А. · Паспорта"), "опись — в инструкции")
+        XCTAssertTrue(instructions.contains("d1 — Паспорт (passport_ru); владелец: Савин И. А.; папка: Паспорта"), "опись с подписями — в инструкции")
         let developer = try XCTUnwrap(json["input"]?.array?.first)
         XCTAssertEqual(developer["content"]?.array?.first?["prompt_cache_breakpoint"]?["mode"]?.string, "explicit",
                        "общий префикс — кэш между разговорами")
@@ -573,7 +573,7 @@ final class CloudChatTests: XCTestCase {
         try await finish(open)
         XCTAssertEqual(StubURLProtocol.requests.count, 1)
         let instructions = try XCTUnwrap(self.instructions(try body(0)))
-        XCTAssertTrue(instructions.contains("d\(id) · passport_ru"), instructions)
+        XCTAssertTrue(instructions.contains("d\(id) — ") && instructions.contains("(passport_ru)"), instructions)
         XCTAssertTrue(instructions.contains("Савин И. А."), "владелец — фамилия и инициалы")
         for number in ["4601", "123456", "770-120"] {
             XCTAssertFalse(instructions.contains(number), "в описи нет номеров: \(number)")
