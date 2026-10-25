@@ -1,6 +1,6 @@
 import SwiftUI
 
-// Предложение разложить файлы. Пока не нажали «Выполнить», в хранилище ничего
+// Предложение разложить файлы. Пока не нажали «Принять», в хранилище ничего
 // не меняется. «Другая папка…» ставит выбранную папку всем сохранениям и
 // переносам. Состояние — в FileProposalLedger: пересозданная карточка не даст
 // выполнить предложение второй раз
@@ -106,7 +106,7 @@ struct FileProposalCardView: View {
                     let inbox = self.inbox ?? ChatAttachmentInbox.unavailable
                     Task { await ledger.run(proposal, store: store, inbox: inbox) }
                 } label: {
-                    Label("Выполнить", systemImage: "checkmark")
+                    Label("Принять", systemImage: "checkmark")
                         .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
@@ -132,7 +132,7 @@ struct FileProposalCardView: View {
                 Button {
                     ledger.cancel(proposal.id)
                 } label: {
-                    Text("Отмена")
+                    Text("Отклонить")
                         .font(.subheadline.weight(.medium))
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
@@ -166,7 +166,7 @@ struct FileProposalCardView: View {
                     .foregroundStyle(Theme.ink)
             }
         case .cancelled:
-            Text("Отменено — ничего не изменилось")
+            Text("Отклонено — ничего не изменилось")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("proposalResult")
