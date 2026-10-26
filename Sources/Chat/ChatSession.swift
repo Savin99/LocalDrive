@@ -334,7 +334,10 @@ final class ChatSession {
             // показывается сразу. Владелец 24.10.2026: такой вопрос думал
             // больше 30 с. «Подумать» и вложения — всегда облако
             var rules: (ChatReply, [Int64: SearchResult])?
-            if attachments.isEmpty, configuration?.reasoning != .deep, !answersAgent {
+            // «Запомни …» — не вопрос: правила нашли бы похожую карточку и
+            // показали её этаж вместо черновика (живой разговор D11, 26.10.2026)
+            let remembers = facts != nil && FactDraftParser.request(in: trimmed) != nil
+            if attachments.isEmpty, configuration?.reasoning != .deep, !answersAgent, !remembers {
                 var router = ChatRouter(search: search)
                 router.onStep = steps
                 router.facts = facts

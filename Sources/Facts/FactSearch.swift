@@ -16,6 +16,11 @@ enum FactSearch {
         /// Пусто — спросили о карточке целиком
         let itemIDs: Set<UUID>
         let score: Int
+        /// Особое слово запроса — в названии карточки: «этаж у Камиллы»
+        var namedByTitle = false
+        /// Сколько общих слов запроса нашлось: «пароль от вайфая» — два у
+        /// дачи, одно у домофона Камилы
+        var fieldHits = 0
     }
 
     static func matches(_ query: String, in cards: [FactCard]) -> [Match] {
@@ -28,9 +33,13 @@ enum FactSearch {
         // Одно-единственное особое слово обязательно — иначе «дом Петра»
         // показал бы чужой дом
         let specificCount = terms.filter { !$0.isGeneric }.count
-        let found = strict.isEmpty && specificCount >= 2
+        var found = strict.isEmpty && specificCount >= 2
             ? cards.compactMap { evaluate($0, terms: terms, mode: .relaxed) }
             : strict
+        // Одни слова-поля — карточки, которые объясняют больше слов запроса
+        if specificCount == 0, let best = found.map(\.fieldHits).max() {
+            found = found.filter { $0.fieldHits == best }
+        }
 
         return found.sorted { lhs, rhs in
             if lhs.score != rhs.score { return lhs.score > rhs.score }
@@ -57,7 +66,14 @@ enum FactSearch {
         var seen = Set<String>()
         return chosen.compactMap { token in
             guard seen.insert(token.stem).inserted else { return nil }
+            // «Вайфая», «этажа» — то же слово с другим окончанием. Только по
+            // общему началу от четырёх букв: по началу слова «Домников» стал
+            // бы «домом», а «Кодин» — «кодом»
             let generic = genericWords.contains(token.word) || genericStems.contains(token.stem)
+                || genericWords.contains { word in
+                    let common = zip(token.word, word).prefix { $0 == $1 }.count
+                    return common >= 4 && common >= max(token.word.count, word.count) - 2
+                }
             return Term(word: token.word, stem: token.stem, isGeneric: generic)
         }
     }
@@ -124,9 +140,13 @@ enum FactSearch {
             if title.contains(where: { matches($0, term) }) {
                 place = .title
             } else {
+                // Вид поля — только для общих слов: «где живёт» → адрес. Особое
+                // слово видом не находится: «какого числа у Ольги день
+                // рождения» находило «число» и «день» в каждой карточке с
+                // этажом или длительностью (владелец 26.10.2026)
                 let tiers: [(Place, [UUID])] = [
                     (.label, items.filter { $0.label.contains { matches($0, term) } }.map(\.id)),
-                    (.kind, items.filter { $0.kind.contains { matches($0, term) } }.map(\.id)),
+                    (.kind, term.isGeneric ? items.filter { $0.kind.contains { matches($0, term) } }.map(\.id) : []),
                     (.value, items.filter { $0.value.contains { matches($0, term) } }.map(\.id)),
                 ]
                 guard let hit = tiers.first(where: { !$0.1.isEmpty }) else { continue }
@@ -153,7 +173,7 @@ enum FactSearch {
         case .relaxed: matchedSpecific > 0 && explainsField
         }
         guard accepted else { return nil }
-        return Match(card: card, itemIDs: highlighted, score: score)
+        return Match(card: card, itemIDs: highlighted, score: score, namedByTitle: specificInTitle, fieldHits: matchedGeneric)
     }
 
     /// Слово текста подходит к слову запроса: та же основа, то же слово или

@@ -494,6 +494,21 @@ final class GenUILiveEvalTests: XCTestCase {
         let passports = await search.documents(ofTypes: [.passportRU])
         let olga = try XCTUnwrap(passports.first { $0.fileName == "паспорт Ольги.txt" }?.id)
         let factsRoot = root.appendingPathComponent("facts-\(UUID().uuidString)", isDirectory: true)
+        // «Карточки» владельца — ловушка: поля-числа, адреса, домофоны.
+        // 26.10.2026 «какого числа у ольги день рождение» показал их вместо паспорта
+        let ownersCards = [
+            FactCard(title: "Логопед Николая", symbol: "figure.child", items: [
+                FactItem(kind: .address, label: "Адрес", value: "Москва, проспект Маршала Жукова, 28"),
+                FactItem(kind: .number, label: "Подъезд", value: "1"),
+                FactItem(kind: .number, label: "Квартира", value: "19"),
+                FactItem(kind: .code, label: "Домофон", value: "19#7088"),
+                FactItem(kind: .number, label: "Длительность занятия, минут", value: "30"),
+            ]),
+            FactCard(title: "Квартира Камиллы", symbol: "house.fill", items: [
+                FactItem(kind: .number, label: "Квартира", value: "178"),
+                FactItem(kind: .number, label: "Этаж", value: "8"),
+            ]),
+        ]
 
         typealias Check = ([ChatSession.Message]) -> Bool
         func fix(_ key: String, _ accepts: @escaping (String) -> Bool) -> Check {
@@ -553,6 +568,18 @@ final class GenUILiveEvalTests: XCTestCase {
                 let last = replies.last
                 return last?.text.contains("Ольга") == true || last?.cards.contains { $0.card.documentIDs.contains(olga) } == true
             }),
+            ("D14 «Какого числа у ольги день рождение» — паспорт, не «Карточки»", ["Какого числа у ольги день рождение"], { replies in
+                replies.last?.cards.contains { card in
+                    if case .fields(let id, let keys) = card.card { return id == olga && keys.contains(FieldKey.birthDate) }
+                    return false
+                } == true
+            }),
+            ("D15 «какой этаж у Камиллы»", ["какой этаж у Камиллы"], { replies in
+                replies.last?.cards.contains { card in
+                    if case .fact(let id, _) = card.card { return id == ownersCards[1].id }
+                    return false
+                } == true
+            }),
         ]
         var steps = dialogs.map { Step(name: $0.name) }
         func finish(_ session: ChatSession) async throws {
@@ -577,7 +604,9 @@ final class GenUILiveEvalTests: XCTestCase {
                 search.owner.clear()
                 let session = ChatSession(search: search, cloudSession: .shared)
                 session.useFiles(store)
-                session.useFacts(FactStore(rootURL: factsRoot.appendingPathComponent(UUID().uuidString)))
+                let factStore = FactStore(rootURL: factsRoot.appendingPathComponent(UUID().uuidString))
+                ownersCards.forEach(factStore.add)
+                session.useFacts(factStore)
                 let started = Date()
                 var transcript: [String] = []
                 var replies: [ChatSession.Message] = []

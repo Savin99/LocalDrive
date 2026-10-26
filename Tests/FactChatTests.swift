@@ -120,6 +120,68 @@ final class FactChatTests: XCTestCase {
         XCTAssertNil(shown(answer), "«дом Петра» показал чужой дом")
     }
 
+    /// Карточки владельца: в них есть поля-числа и адреса, но не дни рождения
+    private func ownersCards() -> [FactCard] {
+        [
+            FactCard(title: "Логопед Николая", symbol: "figure.child", items: [
+                FactItem(kind: .address, label: "Адрес", value: "Москва, проспект Маршала Жукова, 28"),
+                FactItem(kind: .number, label: "Подъезд", value: "1"),
+                FactItem(kind: .number, label: "Квартира", value: "19"),
+                FactItem(kind: .code, label: "Домофон", value: "19#7088"),
+                FactItem(kind: .number, label: "Длительность занятия, минут", value: "30"),
+                FactItem(kind: .link, label: "Открыть в Яндекс.Картах", value: "yandex.ru/maps?text=55.776072,37.475585"),
+            ]),
+            FactCard(title: "Квартира Камиллы", symbol: "house.fill", items: [
+                FactItem(kind: .number, label: "Квартира", value: "178"),
+                FactItem(kind: .number, label: "Этаж", value: "8"),
+            ]),
+        ]
+    }
+
+    /// Иванова Анна Сергеевна, родилась 12.05.1985 — вектор ChatFieldFixTests
+    private static let ivanovaRussian = """
+    ПАСПОРТ
+    PNRUSIVANOVA<<ANNA<SERGEEVNA<<<<<<<<<<<<<<<<
+    4516543213RUS8505121F<<<<<<<0120315690001<44
+    """
+
+    /// Владелец 26.10.2026: «Какого числа у ольги день рождение» — показались
+    /// «Логопед Николая» и «Квартира Камиллы»: «числа» нашлось видом поля
+    /// «число», «день» — видом «дата». Вопрос о человеке из документов —
+    /// ответ его паспортом
+    func testBirthdayQuestionIsNotAnsweredByCardsWithNumbers() async throws {
+        ownersCards().forEach(facts.add)
+        store.createFolder(name: "Паспорта", icon: "folder.fill", color: "indigo")
+        let folder = try XCTUnwrap(store.folders.last)
+        store.importData(Data(Self.ivanovaRussian.utf8), preferredName: "иванова.txt", to: folder)
+        search.reconcile()
+        await search.waitUntilIdle()
+        let passports = await search.documents(ofTypes: [.passportRU])
+        let passport = try XCTUnwrap(passports.first)
+
+        for question in ["Какого числа у анны день рождение", "какого числа у Анны день рождения", "когда день рождения у Анны"] {
+            let answer = await reply(question)
+            XCTAssertNil(shown(answer), "«\(question)» — ответ карточками: \(answer.text)")
+            XCTAssertEqual(answer.cards.first, .fields(documentID: passport.id, keys: [FieldKey.birthDate]), "«\(question)»: \(answer.text)")
+        }
+        // Слова-понятия сами по себе карточку не выбирают
+        XCTAssertTrue(FactSearch.matches("какого числа день", in: facts.cards).isEmpty)
+        // А вопрос о карточке — по-прежнему карточкой
+        let floor = await reply("какой этаж у Камиллы")
+        XCTAssertEqual(shown(floor)?.0, facts.cards.first { $0.title == "Квартира Камиллы" }?.id, floor.text)
+    }
+
+    /// «Запомни» о том, у кого карточка уже есть, — черновик, а не ответ ею
+    func testRememberAboutKnownPersonIsNotALookup() async throws {
+        ownersCards().forEach(facts.add)
+        let session = ChatSession(search: search)
+        session.useFacts(facts)
+        session.send("запомни: у Камиллы домофон 45К1234, этаж 8")
+        for _ in 0..<300 where session.isAnswering { try await Task.sleep(for: .milliseconds(10)) }
+        let answer = try XCTUnwrap(session.messages.last)
+        guard case .factProposal = answer.cards.first?.content else { return XCTFail("не черновик: \(answer.text)") }
+    }
+
     func testRememberInChatProposesCardAndSaves() async throws {
         let session = ChatSession(search: search)
         session.useFacts(facts)

@@ -8,9 +8,12 @@ extension ChatRouter {
     /// или карточки («домофон», «дом», «живёт»): на одно имя («Камила») сначала
     /// отвечает `person` — документами человека, а карточки добавляет к ним.
     /// `force` — документов на имя нет, отвечают карточки
-    func factAnswer(_ text: String, force: Bool = false) -> ChatReply? {
+    /// `asksDocument` — вопрос о поле или виде документа («день рождения
+    /// Ольги»): тогда карточка отвечает, только если её назвали
+    func factAnswer(_ text: String, force: Bool = false, asksDocument: Bool = false) -> ChatReply? {
         guard let facts else { return nil }
-        let matches = facts.matches(text)
+        var matches = facts.matches(text)
+        if asksDocument { matches = matches.filter(\.namedByTitle) }
         guard !matches.isEmpty else { return nil }
         let asksField = FactSearch.terms(in: text).contains(where: \.isGeneric)
         guard force || asksField || matches.contains(where: { !$0.itemIDs.isEmpty }) else { return nil }
