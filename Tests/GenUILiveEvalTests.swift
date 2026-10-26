@@ -322,7 +322,12 @@ final class GenUILiveEvalTests: XCTestCase {
         }
         func describe(_ message: ChatSession.Message?) -> String {
             let cards = message?.cards.map { "\($0.card)".prefix(40) }.joined(separator: ", ") ?? ""
-            return "«\(message?.text.prefix(60) ?? "")» [\(cards)]"
+            // Ответ блоками интерфейса: тип и вид карточки с документом
+            let blocks = (message?.genui?.blocks.flatMap(\.flattened) ?? []).map { block in
+                let card = block.raw["card"]
+                return [block.type, card?["kind"]?.string, card?["document_id"]?.string].compactMap { $0 }.joined(separator: " ")
+            }.joined(separator: ", ")
+            return "«\(message?.text.prefix(60) ?? "")» [\(cards)]" + (blocks.isEmpty ? "" : " {\(blocks)}")
         }
         func fields(_ message: ChatSession.Message?) -> (Int64, [String])? {
             for card in message?.cards ?? [] { if case .fields(let id, let keys) = card.card { return (id, keys) } }

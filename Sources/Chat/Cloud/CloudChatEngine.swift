@@ -424,11 +424,15 @@ final class CloudChatEngine {
     }
 
     /// `facts` — опись «Карточек» без значений (CloudChatFactTools.index)
-    static func system(_ index: String, genUI: Bool = false, owner: String? = nil, facts: String = "") -> String {
+    static func system(_ index: String, genUI: Bool = false, owner: String? = nil, facts: String = "", today: Date = Date()) -> String {
         // Чей «мой паспорт»: модель не угадывает владельца по документам
         let ownerLine = owner.map { "Владелец хранилища: \($0). «Мой», «моя», «мне» — о его документах." }
             ?? "Владелец хранилища неизвестен. На «мой паспорт», «мои документы» при документах нескольких людей не угадывай — спроси, чей, вариантами с именами."
-        let base = (genUI ? CloudChatGenUI.system : CloudChatPrompt.system) + "\n" + ownerLine + "\n" + CloudChatFactTools.instruction
+        // Без даты модель считала возраст от своего года: «Ольге 33 года (по
+        // состоянию на 2025 год)» 26.10.2026 (живая проверка C2)
+        let day = Calendar(identifier: .gregorian).dateComponents([.day, .month, .year], from: today)
+        let dateLine = String(format: "Сегодня %02d.%02d.%04d — возраст и сроки считай от этой даты.", day.day ?? 1, day.month ?? 1, day.year ?? 2026)
+        let base = (genUI ? CloudChatGenUI.system : CloudChatPrompt.system) + "\n" + ownerLine + "\n" + dateLine + "\n" + CloudChatFactTools.instruction
         let lines = index.split(separator: "\n").map { LocalAgentPrompt.labeled(String($0), withType: true) }
         var prompt = lines.isEmpty ? base : base + "\n\nДокументы хранилища:\n" + lines.joined(separator: "\n")
         if !facts.isEmpty { prompt += "\n\nКарточки (id · название · поля):\n" + facts }

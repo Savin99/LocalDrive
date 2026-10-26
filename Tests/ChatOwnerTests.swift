@@ -169,6 +169,13 @@ final class ChatOwnerTests: XCTestCase {
         XCTAssertTrue(CloudChatGenUI.system.contains("series_number тоже"))
     }
 
+    /// Возраст «на сегодня»: без даты модель считала от своего года
+    func testCloudInstructionKnowsToday() throws {
+        let today = try XCTUnwrap(Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 10, day: 26, hour: 12)))
+        XCTAssertTrue(CloudChatEngine.system("", today: today).contains("Сегодня 26.10.2026"))
+        XCTAssertTrue(CloudChatEngine.system("", genUI: true, today: today).contains("Сегодня 26.10.2026"))
+    }
+
     func testSynonymsFindRegistrationByAnotherWord() {
         let variants = CloudChatSynonyms.variants(of: "регистрация")
         XCTAssertTrue(variants.contains("место жительства"))
