@@ -135,29 +135,21 @@ final class ChatOwnerTests: XCTestCase {
         XCTAssertTrue(found, "страница прописки найдена: \(session.messages.last?.text ?? "")")
     }
 
-    func testKnownOwnerPassportIsAnsweredLocallyWithCloudOn() async throws {
-        let (savin, _, _) = try await vault()
-        let suite = "ChatOwner-\(UUID().uuidString)"
-        addTeardownBlock { UserDefaults().removePersistentDomain(forName: suite) }
+    /// Владелец известен — «мой паспорт» с облаком отвечает агент: он знает
+    /// владельца из инструкции и не угадывает чужой паспорт
+    func testKnownOwnerIsToldToAgentWithCloudOn() async throws {
+        _ = try await vault()
         search.cloud.useSessionKey("k")
         search.cloud.setChatEnabled(true)
-        _ = suite
         search.owner.set(fullName: "Савин Илья Андреевич")
-        let router = await ChatRouter(search: search).reply(to: "мой паспорт", preferring: nil, context: [])
-        XCTAssertTrue(ChatSession.isConfidentLookup("мой паспорт", reply: router.0), "\(router.0.cards)")
         StubURLProtocol.reset()
         let session = ChatSession(search: search, cloudSession: StubURLProtocol.session())
         session.send("мой паспорт")
         try await finish(session)
-        XCTAssertTrue(StubURLProtocol.requests.isEmpty, "свой паспорт — без облака")
-        XCTAssertEqual(fieldsCard(session.messages.last)?.id, savin)
-
-        let context = session.messages.last?.cards.flatMap(\.card.documentIDs) ?? []
-        let registration = await ChatRouter(search: search).reply(to: "регистрацию тоже", preferring: nil, context: context)
-        XCTAssertTrue(ChatSession.isConfidentLookup("регистрацию тоже", reply: registration.0), "\(registration.0.text) \(registration.0.cards)")
-        session.send("регистрацию тоже")
-        try await finish(session)
-        XCTAssertTrue(StubURLProtocol.requests.isEmpty, "прописка своего паспорта — без облака")
+        XCTAssertEqual(StubURLProtocol.requests.count, 1, "вопрос ушёл агенту")
+        let body = try XCTUnwrap(StubURLProtocol.requests.first?.httpBody)
+        let text = String(decoding: body, as: UTF8.self)
+        XCTAssertTrue(text.contains("Владелец хранилища: Савин И. А."), "агент не знает владельца")
     }
 
     func testOwnerIsKeptInProtectedFile() throws {

@@ -533,27 +533,31 @@ final class CloudChatTests: XCTestCase {
         XCTAssertFalse(session.isAnswering)
     }
 
-    func testConfidentLookupAnswersWithoutCloud() async throws {
+    /// С облаком на вопрос отвечает агент, а не правила по словам. Владелец
+    /// 26.10.2026: правила ответили «Карточками» на «какого числа у ольги день
+    /// рождение» — «агенту надо было посмотреть доки, найти паспорт, подумать»
+    func testQuestionsGoToAgentWhenCloudIsOn() async throws {
         let (session, local) = cloudSession()
         let id = try await indexPassport(in: local)
-        StubURLProtocol.reset([OpenAI.text("не должен понадобиться")])
+        StubURLProtocol.reset([OpenAI.text("Паспорт Ильи — в папке «Паспорта».")])
         session.send("паспорт ильи")
         try await finish(session)
-        XCTAssertTrue(StubURLProtocol.requests.isEmpty, "однозначный поиск своего документа — без облака")
+        XCTAssertEqual(StubURLProtocol.requests.count, 1, "вопрос ушёл агенту")
         let answer = try XCTUnwrap(session.messages.last)
-        XCTAssertTrue(answer.cards.contains { card in
-            if case .fields(let document, _) = card.card { document == id } else { false }
-        }, "поля паспорта — от правил")
-        XCTAssertNil(answer.notice)
+        XCTAssertEqual(answer.text, "Паспорт Ильи — в папке «Паспорта».")
+        // Агент видит опись: найдёт паспорт сам
+        let instructions = try XCTUnwrap(self.instructions(try body(0)))
+        XCTAssertTrue(instructions.contains("d\(id) — "), instructions)
 
-        // Облако помнит, что человек уже видел
-        StubURLProtocol.reset([OpenAI.text("Готово.")])
-        session.send("что ещё есть в этом документе?")
+        // Облако не ответило — отвечают правила, с честной пометкой
+        StubURLProtocol.reset([OpenAI.error(500, "Internal error", code: "server_error")])
+        session.send("паспорт ильи")
         try await finish(session)
-        let input = conversation(try body(0))
-        XCTAssertEqual(input.first?["content"]?.string, "паспорт ильи")
-        XCTAssertEqual(input.dropFirst().first?["role"]?.string, "assistant")
-        XCTAssertTrue(input.dropFirst().first?["content"]?.string?.contains("d\(id)") == true)
+        let fallback = try XCTUnwrap(session.messages.last)
+        XCTAssertTrue(fallback.cards.contains { card in
+            if case .fields(let document, _) = card.card { document == id } else { false }
+        }, "поля паспорта — от правил: \(fallback.text)")
+        XCTAssertNotNil(fallback.notice)
     }
 
     func testDeepThinkingAndOpenQuestionsGoToCloud() async throws {

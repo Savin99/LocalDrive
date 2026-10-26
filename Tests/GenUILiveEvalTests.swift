@@ -302,11 +302,12 @@ final class GenUILiveEvalTests: XCTestCase {
 
         var steps = ["A1 «мой паспорт» → чей?", "A2 «я Илья» → запомнить", "A3 запомнил → «мой паспорт»", "A4 «дай все данные для копирования»",
                      "A5 «регистрацию тоже»", "B1 модель: «мой паспорт» → чей?", "B2 модель: все данные", "B3 модель: прописка",
-                     // Вопросы владельца 24.10.2026: «дата рождения Ольги» думала больше 30 с
-                     "C1 «дата рождения Ольги» < 1 с", "C2 «сколько лет Ольге» < 1 с", "C3 «а у Ильи?» < 1 с",
-                     "C4 «фото паспорта Ольги» < 1 с", "C5 «перенеси его в папку Ольга» < 1 с", "C6 чип «Номер паспорта» < 1 с",
+                     // Вопросы владельца 24.10.2026: «дата рождения Ольги» думала больше 30 с.
+                     // С 26.10.2026 с облаком отвечает агент — срок 10 с
+                     "C1 «дата рождения Ольги» < 10 с", "C2 «сколько лет Ольге» < 10 с", "C3 «а у Ильи?» < 10 с",
+                     "C4 «фото паспорта Ольги» < 10 с", "C5 «перенеси его в папку Ольга» < 10 с", "C6 чип «Номер паспорта» < 10 с",
                      // Сборка 16 на iPhone: «какой день рождения у этого человека» — без ответа
-                     "C7 «какой день рождения у этого человека?» < 1 с", "C8 «какой день рождения у Ильи» < 1 с",
+                     "C7 «какой день рождения у этого человека?» < 10 с", "C8 «какой день рождения у Ильи» < 10 с",
                      // Облако само, без правил: поправка фамилии — propose_field_fix (24.10.2026)
                      "B4 модель: фамилия с ошибкой → исправление"].map { Step(name: $0) }
         let passports = await search.documents(ofTypes: [.passportRU])
@@ -336,7 +337,8 @@ final class GenUILiveEvalTests: XCTestCase {
         func mentions(_ message: ChatSession.Message?, _ id: Int64) -> Bool {
             if message?.cards.contains(where: { $0.card.documentIDs.contains(id) }) == true { return true }
             let raw = (message?.genui?.blocks.map { "\($0.raw)" }.joined() ?? "") + (message?.text ?? "")
-            return raw.contains("d\(id)") || raw.contains("Тверь") || raw.contains("Советская")
+            if raw.contains("\"d\(id)\"") || raw.contains("d\(id) ") || raw.hasSuffix("d\(id)") { return true }
+            return id == registration && (raw.contains("Тверь") || raw.contains("Советская"))
         }
 
         for _ in 1...runs {
@@ -373,26 +375,41 @@ final class GenUILiveEvalTests: XCTestCase {
             try await finish(session)
             record(4, mentions(session.messages.last, registration), describe(session.messages.last), started)
 
-            // (C) Вопросы о человеке и просьбы — правила, без облака и быстро
+            // (C) Вопросы о человеке и просьбы — агент, за 10 с
             func quick(_ step: Int, _ question: String, _ check: (ChatSession.Message?) -> Bool) async throws {
                 let started = Date()
                 session.send(question)
                 try await finish(session)
-                let fast = Date().timeIntervalSince(started) < 1
+                let fast = Date().timeIntervalSince(started) < 10
                 record(step, check(session.messages.last) && fast, (fast ? "" : "медленно; ") + describe(session.messages.last), started)
             }
-            let birth: (Int64) -> (ChatSession.Message?) -> Bool = { id in { fields($0).map { $0.0 == id && $0.1 == [FieldKey.birthDate] } ?? false } }
+            // Агент отвечает на вопрос о факте словами (правило GenUI 1) или
+            // карточкой — верно и то и другое, если дата та
+            let dates: [Int64: (numeric: String, spoken: String, born: DateComponents)] = [
+                olga: ("02.02.1992", "2 февраля", DateComponents(year: 1992, month: 2, day: 2)),
+                savin: ("01.01.1990", "1 января", DateComponents(year: 1990, month: 1, day: 1)),
+            ]
+            let birth: (Int64) -> (ChatSession.Message?) -> Bool = { id in { message in
+                if fields(message).map({ $0.0 == id && $0.1.contains(FieldKey.birthDate) }) == true { return true }
+                let text = message?.text ?? ""
+                return dates[id].map { text.contains($0.numeric) || text.contains($0.spoken) } ?? false
+            } }
+            let age: (Int64) -> (ChatSession.Message?) -> Bool = { id in { message in
+                if birth(id)(message) { return true }
+                guard let born = dates[id].flatMap({ Calendar.current.date(from: $0.born) }),
+                      let years = Calendar.current.dateComponents([.year], from: born, to: Date()).year else { return false }
+                return message?.text.contains("\(years)") == true
+            } }
             try await quick(8, "дата рождения Ольги", birth(olga))
-            try await quick(9, "сколько лет Ольге", birth(olga))
-            try await quick(10, "а у Ильи?", birth(savin))
+            try await quick(9, "сколько лет Ольге", age(olga))
+            try await quick(10, "а у Ильи?", age(savin))
             // «Его» — паспорт Ильи из прошлого ответа: он лежит в другой папке
             try await quick(12, "перенеси его в папку Ольга") { message in
                 message?.cards.contains { if case .proposal = $0.content { true } else { false } } == true
             }
-            try await quick(11, "фото паспорта Ольги") { message in
-                message?.cards.contains { $0.card == .document(documentID: olga) } == true
-            }
-            try await quick(13, "Номер паспорта") { fields($0).map { $0.0 == savin && $0.1 == [FieldKey.seriesNumber] } ?? false }
+            try await quick(11, "фото паспорта Ольги") { mentions($0, olga) }
+            // После фото паспорта Ольги «номер паспорта» — её или владельца: оба ответа разумны
+            try await quick(13, "Номер паспорта") { fields($0).map { [savin, olga].contains($0.0) && $0.1.contains(FieldKey.seriesNumber) } ?? false }
             // «Этот человек» — тот, чей паспорт только что показан
             session.send("фото паспорта Ольги")
             try await finish(session)
@@ -511,6 +528,21 @@ final class GenUILiveEvalTests: XCTestCase {
         ]
 
         typealias Check = ([ChatSession.Message]) -> Bool
+        /// Документ показан — карточкой или блоком интерфейса; `key` — нужное поле
+        func shows(_ message: ChatSession.Message?, _ id: Int64, key: String? = nil) -> Bool {
+            guard let message else { return false }
+            for card in message.cards {
+                if case .fields(let document, let keys) = card.card, document == id, key.map(keys.contains) ?? true { return true }
+                if key == nil, card.card.documentIDs.contains(id) { return true }
+            }
+            for block in message.genui?.blocks.flatMap(\.flattened) ?? [] where block.type == "app_card" {
+                let card = block.raw["card"]
+                guard GenUIDocumentID.parse(card?["document_id"]) == id else { continue }
+                guard let key else { return true }
+                if card?["keys"]?.array?.compactMap(\.string).contains(key) == true { return true }
+            }
+            return false
+        }
         func fix(_ key: String, _ accepts: @escaping (String) -> Bool) -> Check {
             { replies in
                 replies.contains { message in
@@ -561,24 +593,20 @@ final class GenUILiveEvalTests: XCTestCase {
                     }
                 }
             }),
-            ("D12 «мой паспорт» → «Ольги»", ["мой паспорт", "Ольги"], { replies in
-                replies.last?.cards.contains { $0.card.documentIDs.contains(olga) } == true
-            }),
+            ("D12 «мой паспорт» → «Ольги»", ["мой паспорт", "Ольги"], { replies in shows(replies.last, olga) }),
             ("D13 «где лежит паспорт Ольги?»", ["где лежит паспорт Ольги?"], { replies in
-                let last = replies.last
-                return last?.text.contains("Ольга") == true || last?.cards.contains { $0.card.documentIDs.contains(olga) } == true
+                replies.last?.text.contains("Ольга") == true || shows(replies.last, olga)
             }),
             ("D14 «Какого числа у ольги день рождение» — паспорт, не «Карточки»", ["Какого числа у ольги день рождение"], { replies in
-                replies.last?.cards.contains { card in
-                    if case .fields(let id, let keys) = card.card { return id == olga && keys.contains(FieldKey.birthDate) }
-                    return false
-                } == true
+                let last = replies.last
+                let noCards = last?.cards.contains { if case .fact = $0.card { true } else { false } } != true
+                return noCards && (shows(last, olga, key: FieldKey.birthDate) || last?.text.contains("02.02.1992") == true
+                                   || last?.text.contains("2 февраля") == true)
             }),
             ("D15 «какой этаж у Камиллы»", ["какой этаж у Камиллы"], { replies in
-                replies.last?.cards.contains { card in
-                    if case .fact(let id, _) = card.card { return id == ownersCards[1].id }
-                    return false
-                } == true
+                let last = replies.last
+                let card = last?.cards.contains { if case .fact(let id, _) = $0.card { id == ownersCards[1].id } else { false } } == true
+                return card || last?.text.contains("8") == true
             }),
         ]
         var steps = dialogs.map { Step(name: $0.name) }

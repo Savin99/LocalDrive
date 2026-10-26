@@ -295,7 +295,7 @@ final class ChatSession {
             // «Положи его в Семью», «перенеси паспорт Ольги в Документы» —
             // предложение сразу, без облака: куда класть, человек уже сказал
             if documentID == nil, attachments.isEmpty, let command = ChatFileCommand(trimmed),
-               let reply = await self.fileCommandReply(command, context: context, steps: steps) {
+               let reply = await self.fileCommandReply(command, context: context, delegates: configuration != nil || model != nil, steps: steps) {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
@@ -329,15 +329,20 @@ final class ChatSession {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
-            // Правила — первыми, при любом чате: точный ответ из базы
-            // («дата рождения Ольги», «паспорт Ильи», «а дата выдачи?»)
-            // показывается сразу. Владелец 24.10.2026: такой вопрос думал
-            // больше 30 с. «Подумать» и вложения — всегда облако
+            // Есть облако — на вопросы отвечает агент: смотрит опись, открывает
+            // документ, читает поля и текст, думает. Правила по словам
+            // отвечали раньше него и ошибались там, где агент бы не ошибся:
+            // «какого числа у ольги день рождение» → «Карточки» с этажом.
+            // Владелец 26.10.2026: «агенту всего лишь надо было посмотреть
+            // доки, найти паспорт, посмотреть через OCR, подумать и сказать».
+            // Правила — запасной ответ: облако не ответило или его нет. Без
+            // облака они первыми, перед моделью на iPhone: она медленнее и
+            // слабее (стенд, docs/agent.md)
             var rules: (ChatReply, [Int64: SearchResult])?
             // «Запомни …» — не вопрос: правила нашли бы похожую карточку и
             // показали её этаж вместо черновика (живой разговор D11, 26.10.2026)
             let remembers = facts != nil && FactDraftParser.request(in: trimmed) != nil
-            if attachments.isEmpty, configuration?.reasoning != .deep, !answersAgent, !remembers {
+            if configuration == nil, attachments.isEmpty, !answersAgent, !remembers {
                 var router = ChatRouter(search: search)
                 router.onStep = steps
                 router.facts = facts
@@ -868,7 +873,9 @@ final class ChatSession {
     /// «Положи их в Семью» — вложения, которые ещё не разложили, или
     /// документы прошлого ответа. «Перенеси паспорт Ольги в Документы» — что
     /// именно, находят правила. nil — чата файлов нет (тесты без хранилища)
-    private func fileCommandReply(_ command: ChatFileCommand, context: [Int64], steps: @escaping ChatStepSink) async -> ChatReply? {
+    /// `delegates` — есть агент: непонятное «его» решает он, по разговору
+    private func fileCommandReply(_ command: ChatFileCommand, context: [Int64], delegates: Bool,
+                                  steps: @escaping ChatStepSink) async -> ChatReply? {
         guard let store else { return nil }
         let target = command.target(in: store)
         var actions: [FileProposal.Action] = []
@@ -910,6 +917,8 @@ final class ChatSession {
             }
         }
         guard !actions.isEmpty else {
+            // Агент помнит разговор: «его» после ответа текстом поймёт он
+            if delegates { return nil }
             return ChatReply(
                 text: "Не понял, что положить в «\(command.destination)». Пришлите файл через «+» или найдите документ — потом скажите «положи его в \(command.destination)».",
                 cards: [], isConfident: true
@@ -1201,7 +1210,14 @@ final class ChatSession {
     private func contextDocumentIDs() -> [Int64] {
         guard let last = messages.last(where: { $0.role == .assistant && !$0.isPending }) else { return [] }
         var seen = Set<Int64>()
-        return last.cards.flatMap(\.card.documentIDs).filter { seen.insert($0).inserted }
+        // Агент показывает документы и блоками интерфейса: «перенеси его» после
+        // такого ответа — о них (живой разговор D9, 26.10.2026)
+        let shown = (last.genui?.blocks.flatMap(\.flattened) ?? []).filter { $0.type == "app_card" }.flatMap { block -> [Int64] in
+            let card = block.raw["card"]
+            return [GenUIDocumentID.parse(card?["document_id"])].compactMap { $0 }
+                + (card?["document_ids"]?.array ?? []).compactMap { GenUIDocumentID.parse($0) }
+        }
+        return (last.cards.flatMap(\.card.documentIDs) + shown).filter { seen.insert($0).inserted }
     }
 
     /// Поле исправили или подтвердили — карточки с этим документом перечитываются
