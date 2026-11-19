@@ -16,7 +16,12 @@ struct MainView: View {
     @Environment(HiddenFolders.self) private var hiddenFolders
     @Environment(FactStore.self) private var facts
 
-    @State private var page = MainPage.chat
+    @State private var page: MainPage = {
+        #if DEBUG
+        if let page = DemoVault.startPage { return page }
+        #endif
+        return .chat
+    }()
     /// Сдвиг страниц за пальцем во время свайпа. Отдельный объект, а не
     /// @State экрана: тело MainView не пересобирается на каждом кадре
     @State private var motion = PagerMotion()

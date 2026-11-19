@@ -38,6 +38,10 @@ struct LocalDriveApp: App {
                 .environment(models)
                 .environment(chat)
                 .tint(Theme.accent)
+                #if DEBUG
+                // Демо-хранилище для скриншотов: запуск с -DemoVault
+                .task { DemoVault.seedIfNeeded(store: store, search: search) }
+                #endif
                 .onChange(of: scenePhase) { _, newPhase in
                     switch newPhase {
                     case .background:
