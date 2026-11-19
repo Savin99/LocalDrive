@@ -32,6 +32,11 @@ struct ExpiryCardView: View {
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(remainingColor)
                 }
+                // Точка — месяц до срока: видно, сколько осталось, без чисел
+                if let date = validity.date {
+                    DotMatrixMeter(months: Calendar.current.dateComponents([.month], from: Date(), to: date).month ?? 0)
+                        .padding(.top, 6)
+                }
             }
 
             HStack(spacing: 14) {

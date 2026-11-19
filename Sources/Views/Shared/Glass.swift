@@ -53,22 +53,23 @@ struct AgentOrb: View {
             let angle = isActive && !reduceMotion ? time * 1.6 : 0.8
             let pulse = isActive && !reduceMotion ? 0.5 + 0.5 * sin(time * 2.4) : 0.4
             ZStack {
+                // Ореол: вечером — белый, днём — сиреневый, чтобы шар не терялся на светлом
                 Circle()
-                    .fill(Color.white.opacity(0.10 + 0.12 * pulse))
+                    .fill(scheme == .dark ? Color.white.opacity(0.10 + 0.12 * pulse)
+                                          : Color(red: 0.72, green: 0.66, blue: 1).opacity(0.22 + 0.14 * pulse))
                     .frame(width: size * 1.5, height: size * 1.5)
                     .blur(radius: size * 0.35)
-                // Радужный отлив стекла: холодный и тёплый блик медленно ходят по кругу
-                Circle()
-                    .fill(AngularGradient(colors: [.cyan.opacity(0.35), .purple.opacity(0.3), .orange.opacity(0.2), .cyan.opacity(0.35)],
-                                          center: .center, angle: .radians(angle)))
-                    .frame(width: size * 0.95, height: size * 0.95)
-                    .blur(radius: size * 0.18)
-                    .blendMode(scheme == .dark ? .plusLighter : .normal)
-                    .opacity(scheme == .dark ? 0.55 : 0.35)
                 sphere(size * 0.78)
                     .offset(x: cos(angle) * size * 0.14, y: sin(angle) * size * 0.14)
                 sphere(size * 0.84)
                     .offset(x: -cos(angle) * size * 0.12, y: -sin(angle) * size * 0.12)
+                // Радужный отлив стекла поверх шариков: холодный и тёплый блик ходят по кругу
+                Circle()
+                    .fill(AngularGradient(colors: [.cyan, .purple, .pink, .orange, .cyan], center: .center, angle: .radians(angle)))
+                    .frame(width: size * 0.9, height: size * 0.9)
+                    .blur(radius: size * 0.16)
+                    .blendMode(scheme == .dark ? .plusLighter : .softLight)
+                    .opacity(scheme == .dark ? 0.28 : 0.55)
             }
             .frame(width: size, height: size)
         }
@@ -76,17 +77,18 @@ struct AgentOrb: View {
     }
 
     private func sphere(_ diameter: CGFloat) -> some View {
-        let base = scheme == .dark ? Color.white : Color(white: 0.35)
+        // Вечером — светящееся стекло, днём — белое стекло с тенью (на
+        // iPhone владельца в светлой теме шарики выходили грязно-серыми)
+        let dark = scheme == .dark
+        let colors: [Color] = dark
+            ? [.white.opacity(0.95), .white.opacity(0.32), .white.opacity(0.06)]
+            : [.white, .white.opacity(0.8), Color(white: 0.88).opacity(0.55)]
         return Circle()
-            .fill(
-                RadialGradient(
-                    colors: [base.opacity(0.95), base.opacity(0.32), base.opacity(0.06)],
-                    center: UnitPoint(x: 0.36, y: 0.32), startRadius: 0, endRadius: diameter * 0.62
-                )
-            )
-            .overlay(Circle().strokeBorder(base.opacity(0.45), lineWidth: 0.6))
+            .fill(RadialGradient(colors: colors, center: UnitPoint(x: 0.36, y: 0.32), startRadius: 0, endRadius: diameter * 0.62))
+            .overlay(Circle().strokeBorder(dark ? Color.white.opacity(0.45) : Color.black.opacity(0.08), lineWidth: 0.6))
+            .shadow(color: dark ? .clear : .black.opacity(0.14), radius: diameter * 0.12, y: diameter * 0.05)
             .frame(width: diameter, height: diameter)
-            .blendMode(scheme == .dark ? .screen : .normal)
+            .blendMode(dark ? .screen : .normal)
     }
 }
 
@@ -179,5 +181,31 @@ struct FolderShape: Shape {
         path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - r), control: CGPoint(x: rect.minX, y: rect.maxY))
         path.closeSubpath()
         return path
+    }
+}
+
+/// Точечная шкала в духе Nothing: точка — месяц до срока, до двух лет вперёд.
+/// Мало осталось — оранжевые, срок прошёл — все точки пустые
+struct DotMatrixMeter: View {
+    /// Сколько месяцев осталось
+    let months: Int
+    var total = 24
+
+    private var tint: Color {
+        months <= 6 ? .orange : Theme.ink
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<total, id: \.self) { index in
+                let lit = index < min(max(months, 0), total)
+                Circle()
+                    .fill(lit ? tint : Theme.ink.opacity(0.14))
+                    .frame(width: 7, height: 7)
+                    .shadow(color: lit ? tint.opacity(0.55) : .clear, radius: 2)
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(months > total ? "Больше двух лет до срока" : "Месяцев до срока: \(max(months, 0))")
     }
 }
