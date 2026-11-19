@@ -6,6 +6,9 @@ import XCTest
 final class ChatAssistantUITests: XCTestCase {
     /// В буфере фото — над полем ввода «Вставить», и фото встаёт вложением
     func testClipboardPhotoIsOfferedAndPasted() throws {
+        // Буфер — общий для всех тестов: картинка, оставленная здесь, давала
+        // строку «Вставить» и пункт «Вставить» в меню следующим тестам
+        addTeardownBlock { UIPasteboard.general.items = [] }
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: 120, height: 80))
         UIPasteboard.general.image = renderer.image { context in
             UIColor.systemTeal.setFill()

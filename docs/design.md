@@ -84,9 +84,15 @@ Color, Drag and drop; `UIPasteboard`, `UIPasteControl`, `PasteButton`).
 Ключ облака для чата — из окружения (`SIMCTL_CHILD_OPENAI_API_KEY`), в связку
 ключей не пишется.
 
-UI-тесты (`LocalDriveUITests`): `FileOperationsUITests.testCopyThenPasteIntoAnotherFolderAndShowInfo`
-падает и на прежнем коде (сборка 21): в меню файла пункт «Сведения» есть, но
-без идентификатора `fileInfo` — XCUITest на iOS 27 его не видит.
+UI-тесты (`LocalDriveUITests`, Xcode 27.2, симулятор iOS 27): проходят все,
+кроме двух, которые так же падают на прежнем коде (сборка 21):
+`FileOperationsUITests.testCopyThenPasteIntoAnotherFolderAndShowInfo` и
+`SubfolderUITests.testCreateSubfolderOpenItAndReturnByBreadcrumb` — пункты меню
+«Сведения» и «Новая папка» на месте, но без идентификаторов `fileInfo` и
+`newSubfolder`: XCUITest их не находит. Тест вставки в чат теперь убирает
+картинку из буфера за собой — она давала строку «Вставить» и пункт
+«Вставить» в меню следующим тестам (`PagerTapUITests` промахивался по нижнему
+ряду папок).
 
 ## Не сделано
 
