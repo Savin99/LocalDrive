@@ -37,12 +37,25 @@ enum DemoVault {
         guard isRequested, store.folders.isEmpty else { return }
         for folder in folders {
             guard let created = store.createFolder(name: folder.name, icon: folder.icon, color: folder.color) else { continue }
-            for page in folder.pages {
-                guard let data = render(page)?.jpegData(compressionQuality: 0.85) else { continue }
-                _ = store.importData(data, preferredName: page.file, to: created)
+            fill(created, with: folder.pages, store: store)
+        }
+        // Папка с одними вложенными папками — как «RUDN» у владельца: её превью
+        // берутся из вложенных
+        if let parent = store.createFolder(name: "Учёба", icon: "graduationcap.fill", color: "indigo") {
+            for (name, page) in [("Диплом", studyPages[0]), ("Школа", studyPages[1])] {
+                if let child = store.createFolder(name: name, icon: "folder.fill", color: "indigo", parentID: parent.id) {
+                    fill(child, with: [page], store: store)
+                }
             }
         }
         search.reconcile()
+    }
+
+    private static func fill(_ folder: VaultFolder, with pages: [Page], store: VaultStore) {
+        for page in pages {
+            guard let data = render(page)?.jpegData(compressionQuality: 0.85) else { continue }
+            _ = store.importData(data, preferredName: page.file, to: folder)
+        }
     }
 
     private struct Page {
@@ -59,6 +72,15 @@ enum DemoVault {
         let color: String
         let pages: [Page]
     }
+
+    /// Страницы для папки «Учёба» с вложенными папками
+    private static let studyPages: [Page] = [
+        Page(file: "диплом Ильи.jpg", title: "ДИПЛОМ СПЕЦИАЛИСТА",
+             lines: ["Московский государственный университет", "Савин Илья Андреевич", "Специальность: информатика", "30.06.2012"],
+             tint: UIColor(red: 0.95, green: 0.93, blue: 0.86, alpha: 1)),
+        Page(file: "справка из школы.jpg", title: "СПРАВКА",
+             lines: ["Дана Савиной Камиле Ильиничне", "в том, что она обучается во 2 классе", "ГБОУ «Школа № 1234»"]),
+    ]
 
     private static let passportTint = UIColor(red: 0.98, green: 0.93, blue: 0.93, alpha: 1)
 
