@@ -62,7 +62,8 @@ final class FileOperationsUITests: XCTestCase {
 
         // Сведения: имя и состояние поиска, без содержимого документа
         hint(in: app).press(forDuration: 1.0)
-        let info = app.buttons["fileInfo"]
+        // На iOS 27 пункты меню не отдают свои идентификаторы — ищем по подписи
+        let info = app.collectionViews.buttons["Сведения"]
         XCTAssertTrue(info.waitForExistence(timeout: 5), "в меню файла нет «Сведения»\n" + app.debugDescription)
         info.tap()
         XCTAssertTrue(app.navigationBars["Сведения"].waitForExistence(timeout: 5))

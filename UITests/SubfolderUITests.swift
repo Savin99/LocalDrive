@@ -78,7 +78,8 @@ final class SubfolderUITests: XCTestCase {
     /// «+» в шапке папки → «Новая папка»
     private func createSubfolder(_ name: String, in app: XCUIApplication) {
         app.buttons["Добавить файл"].tap()
-        let item = app.buttons["newSubfolder"]
+        // На iOS 27 пункты меню не отдают свои идентификаторы — ищем по подписи
+        let item = app.collectionViews.buttons["Новая папка"]
         XCTAssertTrue(item.waitForExistence(timeout: 5), "в меню «+» нет «Новая папка»\n" + app.debugDescription)
         item.tap()
         fillEditor(name, in: app)
