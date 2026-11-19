@@ -111,6 +111,63 @@ final class GenUISchemaTests: XCTestCase {
         XCTAssertEqual(uiWithoutBlocks.document.mode, .text)
     }
 
+    /// Источники и следующие вопросы: id документов без повторов, вопросы —
+    /// короткие; без этих полей (старый ответ из истории) — пусто
+    func testSourcesAndFollowups() {
+        let long = String(repeating: "я", count: GenUILimits.maxFollowupLength + 1)
+        let validation = validate(#"""
+        {"version":1,"mode":"text","text":"Загранпаспорт действует до 15.03.2031.","state":[],"computed":[],"blocks":[],
+         "sources":["d7","d7",12,"папка","d8","d9"],"followups":[" Показать скан ","Показать скан","","\#(long)","Прописка","Когда истекает","Ещё один"]}
+        """#)
+        XCTAssertEqual(validation.issues, [], "\(validation.issues)")
+        XCTAssertEqual(validation.document.sources, [7, 12, 8])
+        XCTAssertEqual(validation.document.followups, ["Показать скан", "Прописка", "Когда истекает"])
+        XCTAssertEqual(GenUIValidator.document(from: validation.document.json).document, validation.document, "запись в историю и обратно")
+
+        let old = validate(#"{"version":1,"mode":"text","text":"Привет","state":[],"computed":[],"blocks":[]}"#)
+        XCTAssertEqual(old.document.sources, [])
+        XCTAssertEqual(old.document.followups, [])
+    }
+
+    /// В потоке sources и followups идут после blocks: блоки показываются как
+    /// раньше, а источники и вопросы приходят с готовым ответом
+    @MainActor
+    func testStreamKeepsSourcesAndFollowupsForTheEnd() {
+        let feed = GenUIStreamFeed()
+        let json = #"{"version":1,"mode":"mixed","text":"Вот договор.","state":[],"computed":[],"blocks":[{"id":"d","type":"divider","visible_if":null}],"sources":["d3"],"followups":["Сумма аренды"]}"#
+        for character in json { feed.feed(String(character)) }
+        XCTAssertEqual(feed.model.blocks.map(\.id), ["d"])
+        XCTAssertEqual(feed.model.followups, [], "до конца потока вопросов нет")
+        feed.finish()
+        XCTAssertEqual(feed.model.phase, .finished)
+        XCTAssertEqual(feed.model.sources, [3])
+        XCTAssertEqual(feed.model.followups, ["Сумма аренды"])
+    }
+
+    /// Что ответ уже показывает и спрашивает ли он сам: от этого зависит,
+    /// будут ли под ним строка источника и следующие вопросы
+    func testShownDocumentsAndQuestionsInBlocks() {
+        let answer = validate(#"""
+        {"version":1,"mode":"mixed","text":"Вот файлы.","state":[],"computed":[],"blocks":[
+         {"id":"files","type":"list","visible_if":null,"items":[
+           {"text":"Чек","secondary":null,"icon":null,"action":{"kind":"open_document","document_id":"d5"}}]},
+         {"id":"card","type":"app_card","visible_if":null,"card":{"kind":"file_list","document_id":null,"document_ids":["d6","d7"],"keys":null,"page":null}}],
+         "sources":["d5"],"followups":[]}
+        """#)
+        XCTAssertEqual(answer.document.blocks.map(\.id), ["files", "card"], "\(answer.issues)")
+        XCTAssertEqual(ChatSources.shown(in: answer.document.blocks), [5, 6, 7])
+        XCTAssertFalse(ChatSources.asks(in: answer.document.blocks))
+
+        let question = validate(#"""
+        {"version":1,"mode":"mixed","text":"Чей паспорт?","state":[],"computed":[],"blocks":[
+         {"id":"who","type":"list","visible_if":null,"items":[
+           {"text":"Паспорт Ольги","secondary":null,"icon":null,"action":{"kind":"ask","text":"Паспорт Ольги"}}]}],
+         "sources":["d3"],"followups":["Данные паспорта"]}
+        """#)
+        XCTAssertEqual(question.document.blocks.map(\.id), ["who"], "\(question.issues)")
+        XCTAssertTrue(ChatSources.asks(in: question.document.blocks))
+    }
+
     func testLenientFormsOutsideStrictMode() {
         // Словари вместо массивов и пропущенные поля — так пишут модели без строгого режима
         let validation = validate(#"""

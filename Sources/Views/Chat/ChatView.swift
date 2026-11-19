@@ -238,7 +238,7 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     ForEach(session.messages) { message in
-                        MessageRow(message: message, onRemember: { session.rememberOwner($0) })
+                        MessageRow(message: message, isLast: message.id == session.messages.last?.id, onRemember: { session.rememberOwner($0) })
                             .id(message.id)
                     }
                 }
@@ -513,8 +513,21 @@ private struct FieldEditRequest: Identifiable {
 
 private struct MessageRow: View {
     let message: ChatSession.Message
+    /// Последний ответ: под ним — что спросить дальше
+    var isLast = false
     var onRemember: (OwnerSuggestion) -> Void = { _ in }
     @Environment(SearchService.self) private var search
+
+    /// Документы-источники, которых в ответе ещё не видно: показанное
+    /// карточкой, списком или кнопкой не повторяется
+    private var sources: [Int64] {
+        guard let genui = message.genui, !message.isPending, !ChatSources.asks(in: genui.blocks) else { return [] }
+        let shown = ChatSources.shown(in: genui.blocks).union(message.cards.flatMap(\.card.documentIDs))
+        return genui.sources.filter { !shown.contains($0) }
+    }
+
+    /// Источники с файлами и папками — из базы; скрытая папка сюда не попадёт
+    @State private var sourceDocuments: [ChatDocument] = []
 
     var body: some View {
         switch message.role {
@@ -568,7 +581,8 @@ private struct MessageRow: View {
                     GenUIMessageView(model: genui, environment: GenUIEnvironment(
                         dataProvider: GenUIIndexDataProvider(search: search),
                         actionPerformer: message.genuiPerformer,
-                        appCard: { card in AnyView(GenUIAppCardView(card: card)) }
+                        appCard: { card in AnyView(GenUIAppCardView(card: card)) },
+                        fileRow: { id, title, secondary in AnyView(ChatFileRowLoader(documentID: id, title: title, secondary: secondary)) }
                     ))
                     .accessibilityIdentifier("chatInterface")
                 } else if message.isPending, message.text.isEmpty, message.cards.isEmpty, message.startedAt == nil, message.steps.isEmpty {
@@ -586,6 +600,11 @@ private struct MessageRow: View {
                 ForEach(message.cards) { card in
                     ChatCardView(card: card)
                 }
+                // Откуда ответ: сам документ — строкой с превью
+                if !sourceDocuments.isEmpty {
+                    ChatSourcesView(documents: sourceDocuments)
+                        .transition(.opacity)
+                }
                 if let suggestion = message.ownerSuggestion {
                     Button {
                         onRemember(suggestion)
@@ -596,8 +615,19 @@ private struct MessageRow: View {
                     .buttonStyle(.glass)
                     .accessibilityIdentifier("chatRememberOwner")
                 }
+                // Что спросить дальше — только под последним готовым ответом
+                if isLast, !message.isPending, let genui = message.genui, !genui.followups.isEmpty, !ChatSources.asks(in: genui.blocks) {
+                    ChatFollowUps(questions: genui.followups)
+                        .transition(.opacity)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Задача — на столбце ответа, а не на строке источника: пока
+            // документов нет, строки нет, и её задача не запустилась бы
+            .task(id: sources) {
+                let found = sources.isEmpty ? [] : await ChatSources.documents(sources, search: search)
+                withAnimation(.snappy(duration: 0.2)) { sourceDocuments = found }
+            }
             }
         }
     }

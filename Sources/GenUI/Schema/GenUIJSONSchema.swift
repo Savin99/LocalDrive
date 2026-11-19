@@ -95,6 +95,10 @@ enum GenUIJSONSchema {
                 .required("expr", .string(description: "Выражение над состоянием и другими computed")),
             ]), maxItems: GenUILimits.maxComputed)),
             .required("blocks", .array(.ref("block"), maxItems: 40)),
+            .required("sources", .array(.string(), maxItems: GenUILimits.maxSources,
+                                        description: "id документов, из которых взят ответ; пусто, если ответ не из документов")),
+            .required("followups", .array(.string(), maxItems: GenUILimits.maxFollowups,
+                                          description: "Короткие следующие вопросы от лица человека; пусто, если предложить нечего")),
         ])
         var root_ = strict(root)
         guard case .object(var pairs) = root_ else { return root_ }

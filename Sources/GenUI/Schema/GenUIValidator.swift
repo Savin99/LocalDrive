@@ -49,8 +49,26 @@ enum GenUIValidator {
         }
 
         let state = reconcile(declared, binds: parser.binds, issues: &issues)
-        let document = GenUIDocument(version: GenUISchema.version, mode: mode, text: text, state: state, computed: computed, blocks: blocks)
+        let document = GenUIDocument(
+            version: GenUISchema.version, mode: mode, text: text, state: state, computed: computed, blocks: blocks,
+            sources: sources(from: props["sources"]), followups: followups(from: props["followups"])
+        )
         return GenUIValidation(document: document, issues: issues)
+    }
+
+    /// Источники ответа: id документов без повторов. Чужой id не страшен —
+    /// документ, которого нет в поиске, чат не покажет
+    static func sources(from json: JSONValue?) -> [Int64] {
+        var seen = Set<Int64>()
+        return Array((json?.array ?? []).compactMap { GenUIDocumentID.parse($0) }.filter { seen.insert($0).inserted }.prefix(GenUILimits.maxSources))
+    }
+
+    /// Следующие вопросы: короткие строки без повторов, длинные выпадают
+    static func followups(from json: JSONValue?) -> [String] {
+        var seen = Set<String>()
+        return Array((json?.array ?? []).compactMap { $0.string?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.count <= GenUILimits.maxFollowupLength && seen.insert($0).inserted }
+            .prefix(GenUILimits.maxFollowups))
     }
 
     /// Один элемент `blocks` — для потока: показывать блоки по мере прихода.

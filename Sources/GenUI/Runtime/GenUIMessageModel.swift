@@ -17,6 +17,9 @@ final class GenUIMessageModel: Identifiable {
     private(set) var mode: GenUIDocument.Mode = .text
     private(set) var text = ""
     private(set) var blocks: [GenUIBlock] = []
+    /// Источники и следующие вопросы приходят последними — с готовым ответом
+    private(set) var sources: [Int64] = []
+    private(set) var followups: [String] = []
     private(set) var issues: [GenUIIssue] = []
     private(set) var phase: Phase = .streaming
     let state = GenUIState()
@@ -104,6 +107,8 @@ final class GenUIMessageModel: Identifiable {
         state.apply(document, keepingChanges: true)
         withAnimation(Self.appearAnimation) {
             blocks = document.blocks
+            sources = document.sources
+            followups = document.followups
         }
         phase = .finished
     }
@@ -174,7 +179,7 @@ final class GenUIMessageModel: Identifiable {
 
     /// Ответ как документ: для истории и для модели при перестройке блока
     var document: GenUIDocument {
-        GenUIDocument(mode: mode, text: text, state: declared, computed: computed, blocks: blocks)
+        GenUIDocument(mode: mode, text: text, state: declared, computed: computed, blocks: blocks, sources: sources, followups: followups)
     }
 
     /// Показывать нечего: пусто и поток закончен

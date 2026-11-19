@@ -27,7 +27,22 @@ struct GenUIButtonComponent: GenUIComponent {
     }
 
     func render(_ context: GenUIRenderContext, block: GenUIBlock) -> AnyView {
-        AnyView(GenUIActionButton(label: context.text(label), primary: style == "primary", action: action, blockID: block.id, context: context))
+        // Кнопка, открывающая документ, — строка с его превью: файл узнают
+        // по виду. Подпись модели остаётся
+        if case .openDocument(let id) = action, let fileRow = context.environment.fileRow {
+            return AnyView(
+                Button {
+                    context.perform(action, block: block.id)
+                } label: {
+                    fileRow(id, context.text(label), nil)
+                }
+                .buttonStyle(.plain)
+                .disabled(context.isRunning(block.id))
+                .genUICard()
+                .accessibilityIdentifier("genui-\(block.id)")
+            )
+        }
+        return AnyView(GenUIActionButton(label: context.text(label), primary: style == "primary", action: action, blockID: block.id, context: context))
     }
 }
 

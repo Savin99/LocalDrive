@@ -26,15 +26,20 @@ struct GenUIEnvironment {
     var actionPerformer: (any GenUIActionPerformer)?
     /// Карточка из каталога чата (`app_card`): приложение берёт значения из базы
     var appCard: (@MainActor (ChatCard) -> AnyView)?
+    /// Строка файла для пункта списка или кнопки, открывающих документ:
+    /// приложение рисует превью и папку, подпись и вторая строка — модели
+    var fileRow: (@MainActor (_ documentID: Int64, _ title: String, _ secondary: String?) -> AnyView)?
 
     init(
         dataProvider: (any GenUIDataProvider)? = nil,
         actionPerformer: (any GenUIActionPerformer)? = nil,
-        appCard: (@MainActor (ChatCard) -> AnyView)? = nil
+        appCard: (@MainActor (ChatCard) -> AnyView)? = nil,
+        fileRow: (@MainActor (_ documentID: Int64, _ title: String, _ secondary: String?) -> AnyView)? = nil
     ) {
         self.dataProvider = dataProvider
         self.actionPerformer = actionPerformer
         self.appCard = appCard
+        self.fileRow = fileRow
     }
 
     static let empty = GenUIEnvironment()

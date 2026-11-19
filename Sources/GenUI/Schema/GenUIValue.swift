@@ -18,6 +18,9 @@ enum GenUILimits {
     static let maxListItems = 50
     static let maxTabs = 8
     static let maxLabelLength = 200
+    static let maxSources = 3
+    static let maxFollowups = 3
+    static let maxFollowupLength = 60
 }
 
 /// Значение свойства: готовое или выражение над состоянием

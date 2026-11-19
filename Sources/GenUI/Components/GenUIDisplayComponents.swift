@@ -255,7 +255,7 @@ struct GenUIListComponent: GenUIComponent {
         AnyView(
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                    if index > 0 { Divider().padding(.leading, item.icon == nil ? 0 : 30) }
+                    if index > 0 { Divider().padding(.leading, dividerInset(item, context: context)) }
                     row(item, index: index, context: context, block: block)
                 }
             }
@@ -264,24 +264,44 @@ struct GenUIListComponent: GenUIComponent {
         )
     }
 
+    /// Пункт открывает документ, а приложение умеет показать его строкой с превью
+    @MainActor
+    private func fileRow(_ item: Item, context: GenUIRenderContext) -> AnyView? {
+        guard case .openDocument(let id)? = item.action, let fileRow = context.environment.fileRow else { return nil }
+        return fileRow(id, context.text(item.text), item.secondary.map { context.text($0) })
+    }
+
+    @MainActor
+    private func dividerInset(_ item: Item, context: GenUIRenderContext) -> CGFloat {
+        if fileRow(item, context: context) != nil { return 56 }
+        return item.icon == nil ? 0 : 30
+    }
+
     @MainActor @ViewBuilder
     private func row(_ item: Item, index: Int, context: GenUIRenderContext, block: GenUIBlock) -> some View {
-        let content = HStack(alignment: .top, spacing: 10) {
-            if let icon = item.icon {
-                Image(systemName: icon)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 20)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(context.text(item.text)).font(.subheadline).foregroundStyle(Theme.ink)
-                if let secondary = item.secondary {
-                    Text(context.text(secondary)).font(.caption).foregroundStyle(.secondary)
+        let content = Group {
+            if let fileRow = fileRow(item, context: context) {
+                // Документ виден сам: превью вместо общего значка
+                fileRow
+            } else {
+                HStack(alignment: .top, spacing: 10) {
+                    if let icon = item.icon {
+                        Image(systemName: icon)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(context.text(item.text)).font(.subheadline).foregroundStyle(Theme.ink)
+                        if let secondary = item.secondary {
+                            Text(context.text(secondary)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    if item.action != nil {
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    }
                 }
-            }
-            Spacer(minLength: 0)
-            if item.action != nil {
-                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 8)

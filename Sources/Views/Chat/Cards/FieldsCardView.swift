@@ -37,6 +37,20 @@ struct FieldsCardView: View {
                     }
                     row(field)
                 }
+                // Значения взяты из этого файла: он рядом — сверить с фото
+                // можно одним касанием, а не через меню долгого нажатия
+                Rectangle()
+                    .fill(Theme.hairline)
+                    .frame(height: 1)
+                Button {
+                    actions.open(document.file, [document.file], nil)
+                } label: {
+                    ChatFileRow(document: document, showsFolder: false)
+                        .padding(.top, 10)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Открыть файл: \(document.file.displayName)")
+                .accessibilityIdentifier("chatFieldsSource")
             }
         }
         .chatCardSurface()

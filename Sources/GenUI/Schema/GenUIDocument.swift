@@ -56,6 +56,10 @@ struct GenUIDocument: Hashable, Sendable {
     var state: [(name: String, value: GenUIScalar)]
     var computed: [(name: String, expression: GenUIExpression)]
     var blocks: [GenUIBlock]
+    /// Документы, из которых взят ответ: чат показывает их строкой под ответом
+    var sources: [Int64]
+    /// Что спросить дальше — чипами под последним ответом
+    var followups: [String]
 
     init(
         version: Int = GenUISchema.version,
@@ -63,7 +67,9 @@ struct GenUIDocument: Hashable, Sendable {
         text: String,
         state: [(name: String, value: GenUIScalar)] = [],
         computed: [(name: String, expression: GenUIExpression)] = [],
-        blocks: [GenUIBlock] = []
+        blocks: [GenUIBlock] = [],
+        sources: [Int64] = [],
+        followups: [String] = []
     ) {
         self.version = version
         self.mode = mode
@@ -71,6 +77,8 @@ struct GenUIDocument: Hashable, Sendable {
         self.state = state
         self.computed = computed
         self.blocks = blocks
+        self.sources = sources
+        self.followups = followups
     }
 
     /// Привязки всех полей ввода ответа
@@ -97,6 +105,8 @@ struct GenUIDocument: Hashable, Sendable {
             "state": .array(state.map { .object(["name": .string($0.name), "value": $0.value.json]) }),
             "computed": .array(computed.map { .object(["name": .string($0.name), "expr": .string($0.expression.source)]) }),
             "blocks": .array(blocks.map(\.raw)),
+            "sources": .array(sources.map { .string(ChatCard.encodeID($0)) }),
+            "followups": .array(followups.map { .string($0) }),
         ])
     }
 
