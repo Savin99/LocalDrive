@@ -80,6 +80,12 @@ final class ChatLiveEvalTests: XCTestCase {
         var steps: [String] = []
         /// Последний ответ модели как есть — JSON интерфейса: почему ответ пустой
         var raw = ""
+        /// Источник виден: назван в sources или документ показан карточкой
+        var hasSource = false
+        /// Документы из sources ответа
+        var sources: [Int64] = []
+        /// Что спросить дальше — чипы под ответом
+        var followups: [String] = []
     }
 
     // MARK: - Проверки
@@ -306,6 +312,9 @@ final class ChatLiveEvalTests: XCTestCase {
                 outcome.answer = String(answer.visible.replacingOccurrences(of: "\n", with: " ").prefix(160))
                 outcome.notice = last.notice
                 outcome.steps = last.steps.map(\.text)
+                outcome.hasSource = !(last.genui?.sources.isEmpty ?? true) || !answer.shown.isEmpty
+                outcome.sources = last.genui?.sources ?? []
+                outcome.followups = last.genui?.followups ?? []
                 if !outcome.passed, let item = session.cloudEngine?.history.last(where: { $0["type"]?.string == "message" }) {
                     outcome.raw = String((item["content"]?.array?.compactMap { $0["text"]?.string }.joined() ?? "").prefix(400))
                 }
@@ -414,6 +423,8 @@ final class ChatLiveEvalTests: XCTestCase {
             "- Запросов к облаку: \(usage.requests), токенов входа \(usage.inputTokens), из кэша \(usage.cachedTokens) "
                 + "(\(usage.inputTokens == 0 ? 0 : usage.cachedTokens * 100 / usage.inputTokens)%), выхода \(usage.outputTokens)",
             "- Цена прогона: $\(String(format: "%.3f", cost))",
+            "- Источник виден (sources или карточка документа): \(outcomes.filter(\.hasSource).count) из \(outcomes.count); "
+                + "следующие вопросы предложены: \(outcomes.filter { !$0.followups.isEmpty }.count) из \(outcomes.count)",
             "",
             "| Группа | Верно | Первый ответ, с | Целиком, с |",
             "| --- | --- | --- | --- |",
@@ -434,7 +445,9 @@ final class ChatLiveEvalTests: XCTestCase {
             let miss = items.first { !$0.passed } ?? items.first
             let steps = (miss?.steps ?? []).isEmpty ? "" : " ⟨" + (miss?.steps ?? []).joined(separator: " → ") + "⟩"
             let raw = (miss?.raw ?? "").isEmpty ? "" : " `" + (miss?.raw ?? "").replacingOccurrences(of: "`", with: "'") + "`"
-            let answer = ((miss?.notice).map { "[\($0)] " } ?? "") + (miss?.answer ?? "") + steps + raw
+            let next = (miss?.followups ?? []).isEmpty ? "" : " ⟦" + (miss?.followups ?? []).joined(separator: " · ") + "⟧"
+            let from = (miss?.sources ?? []).isEmpty ? "" : " ⟪" + (miss?.sources ?? []).map(ChatCard.encodeID).joined(separator: " ") + "⟫"
+            let answer = ((miss?.notice).map { "[\($0)] " } ?? "") + (miss?.answer ?? "") + from + next + steps + raw
             lines.append("| \(id) | \(items.filter(\.passed).count)/\(items.count) | "
                 + "\(String(format: "%.1f", median(items.compactMap(\.firstContent)))) | \(String(format: "%.1f", median(items.map(\.seconds)))) | "
                 + "\(String(format: "%.1f", Double(usage.requests) / Double(max(1, items.count)))) | "
