@@ -91,8 +91,14 @@ enum CloudJSON: Equatable, Sendable, Codable {
         try? JSONDecoder().decode(CloudJSON.self, from: data)
     }
 
+    /// Ключи — по алфавиту. Словарь Swift перебирается в случайном порядке, и
+    /// JSONEncoder собирает его заново при каждой записи: схемы инструментов
+    /// уходили в OpenAI каждый раз в новом порядке, сервер видел новое начало
+    /// промпта, и кэш не срабатывал ни разу (замер 19.11.2026, docs/cloud-chat.md)
     var data: Data {
-        (try? JSONEncoder().encode(self)) ?? Data("null".utf8)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return (try? encoder.encode(self)) ?? Data("null".utf8)
     }
 }
 

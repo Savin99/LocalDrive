@@ -22,7 +22,14 @@ struct GenUIAppCardView: View {
             }
         }
         .task(id: card) {
-            resolved = await ChatCardResolver(search: search).resolve([card]).first
+            let resolver = ChatCardResolver(search: search)
+            resolved = await resolver.resolve([card]).first
+            // Полей у документа нет (договор, свидетельство) или модель назвала
+            // чужие ключи — показываем сам документ, а не пустое место
+            // (живая проверка 19.11.2026). Выдуманных значений так не бывает
+            if resolved == nil, case .fields(let id, _) = card {
+                resolved = await resolver.resolve([.document(documentID: id)]).first
+            }
             loaded = true
         }
         .accessibilityIdentifier("genui-app-card")

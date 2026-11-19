@@ -261,7 +261,9 @@ final class GenUILiveEvalTests: XCTestCase {
         return lines.joined(separator: "\n")
     }
 
-    /// Цена по таблице OpenAI на 12.10.2026; у Luna — быстрый режим, ×2
+    /// Цена по таблице OpenAI на 19.11.2026; у Luna — быстрый режим, ×2.
+    /// Запись в кэш — 1,25× цены входа на 30 минут и 2,5× на 12 часов
+    /// (prompt caching, «Monitor cache performance»)
     static func cost(_ usage: CloudChatUsage, model: CloudChatModel) -> Double {
         let (input, cached, output): (Double, Double, Double) = switch model {
         case .luna: (0.20, 0.02, 1.00)
@@ -269,8 +271,10 @@ final class GenUILiveEvalTests: XCTestCase {
         case .astra: (10.00, 1.00, 50.00)
         default: (0, 0, 0)
         }
-        let fresh = Double(usage.inputTokens - usage.cachedTokens)
-        return (fresh * input + Double(usage.cachedTokens) * cached + Double(usage.outputTokens) * output) / 1_000_000
+        let shortWrites = Double(usage.cacheWriteTokens - usage.longCacheWriteTokens)
+        let fresh = Double(usage.inputTokens - usage.cachedTokens - usage.cacheWriteTokens)
+        let writes = shortWrites * 1.25 + Double(usage.longCacheWriteTokens) * 2.5
+        return ((fresh + writes) * input + Double(usage.cachedTokens) * cached + Double(usage.outputTokens) * output) / 1_000_000
     }
 
     // MARK: - Жалобы владельца 13.10.2026: чей паспорт, все данные, прописка

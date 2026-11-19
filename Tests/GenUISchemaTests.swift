@@ -29,6 +29,18 @@ final class GenUISchemaTests: XCTestCase {
         XCTAssertTrue(validation.issues.contains { $0.message.contains("ошибка в выражении") })
     }
 
+    /// Модель просит «все поля» без keys и «сроки» списком документов —
+    /// карточки показываются, а не отбрасываются (живая проверка 19.11.2026)
+    func testAppCardAcceptsAllFieldsAndSeveralDocuments() {
+        let validation = validate(#"{"version":1,"mode":"ui","text":"","state":[],"computed":[],"blocks":["#
+            + #"{"id":"a","type":"app_card","visible_if":null,"card":{"kind":"fields","document_id":"d3","document_ids":null,"keys":null,"page":null}},"#
+            + #"{"id":"b","type":"app_card","visible_if":null,"card":{"kind":"expiry","document_id":null,"document_ids":["d15","d11"],"keys":null,"page":null}},"#
+            + #"{"id":"c","type":"app_card","visible_if":null,"card":{"kind":"fields","document_id":null,"document_ids":null,"keys":null,"page":null}}]}"#)
+        let cards = validation.document.blocks.compactMap { ($0.component as? GenUIAppCardComponent)?.cards }
+        XCTAssertEqual(cards, [[.fields(documentID: 3, keys: FieldKey.order)], [.expiry(documentID: 15), .expiry(documentID: 11)]],
+                       "без документа карточки нет")
+    }
+
     func testBrokenJSONFallsBackToEmptyDocument() {
         let validation = validate(GenUIGallery.brokenJSON)
         XCTAssertTrue(validation.document.isEmpty)

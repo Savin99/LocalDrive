@@ -581,6 +581,35 @@ final class CloudPassTests: XCTestCase {
         XCTAssertEqual(search.progress.cloudRead, 1)
     }
 
+    /// «Оставляем только облако» (19.11.2026): первый ключ включает чат и
+    /// распознавание; выключенное вручную повторный ключ не включает; у тех,
+    /// кто обновился с уже сохранённым ключом, чат через облако включается сам
+    func testFirstKeyTurnsCloudOnOnce() {
+        let fresh = CloudRecognitionStore(defaults: defaults, keychainService: keychainService)
+        XCTAssertFalse(fresh.chatEnabled)
+        XCTAssertFalse(fresh.isEnabled)
+        fresh.setKey("k")
+        XCTAssertTrue(fresh.chatEnabled, "первый ключ — чат через облако")
+        XCTAssertTrue(fresh.isEnabled, "и распознавание")
+        fresh.setChatEnabled(false)
+        fresh.setEnabled(false)
+        fresh.setKey("k2")
+        XCTAssertFalse(fresh.chatEnabled, "выключенное вручную повторный ключ не включает")
+        XCTAssertFalse(fresh.isEnabled)
+
+        let suite = "Upgrade-\(UUID().uuidString)"
+        let upgraded = UserDefaults(suiteName: suite)!
+        defer { upgraded.removePersistentDomain(forName: suite) }
+        let service = "upgrade.\(UUID().uuidString)"
+        Keychain.set(Data("old".utf8), service: service + ".openai")
+        defer { Keychain.delete(service: service + ".openai") }
+        upgraded.set("local", forKey: "chat.model")
+        let store = CloudRecognitionStore(defaults: upgraded, keychainService: service)
+        XCTAssertTrue(store.chatEnabled, "ключ уже был — чат через облако включён")
+        XCTAssertEqual(store.chatModel, .luna, "«iPhone» на поле ввода сброшен")
+        XCTAssertFalse(store.isEnabled, "распознавание — как настроил владелец")
+    }
+
     func testKeyIsKeptInKeychainOnlyPerProvider() {
         let settings = CloudRecognitionStore(defaults: defaults, keychainService: keychainService)
         XCTAssertEqual(settings.provider, .openAI, "облако по умолчанию — OpenAI")

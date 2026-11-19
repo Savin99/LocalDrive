@@ -150,9 +150,17 @@ final class CloudChatTests: XCTestCase {
         try XCTUnwrap(CloudJSON.parse(XCTUnwrap(StubURLProtocol.requests[index].httpBody)))
     }
 
-    /// Инструкция OpenAI — первый элемент input, сообщение developer
+    /// Инструкция OpenAI — первый элемент input, сообщение developer: блоки
+    /// правил, описи и даты подряд
     private func instructions(_ json: CloudJSON) -> String? {
-        json["input"]?.array?.first { $0["role"]?.string == "developer" }?["content"]?.array?.first?["text"]?.string
+        json["input"]?.array?.first { $0["role"]?.string == "developer" }?["content"]?.array?.compactMap { $0["text"]?.string }.joined()
+    }
+
+    /// Уровень рассуждения последнего вопроса: последний configuration_update,
+    /// а без него — поле запроса
+    private func effort(_ json: CloudJSON) -> String? {
+        conversation(json).last { $0["type"]?.string == "configuration_update" }?["reasoning"]?["effort"]?.string
+            ?? json["reasoning"]?["effort"]?.string
     }
 
     /// Ход разговора без инструкции
@@ -289,7 +297,8 @@ final class CloudChatTests: XCTestCase {
         XCTAssertEqual(CloudChatReasoning.fast.level(for: .flashLite), "minimal")
         XCTAssertEqual(CloudChatReasoning.deep.level(for: .flash), "high")
         // OpenAI: none есть только у Luna
-        XCTAssertEqual(CloudChatReasoning.auto.level(for: .luna, message: "паспорт ильи"), "low", "вопрос о документе — low")
+        XCTAssertEqual(CloudChatReasoning.auto.level(for: .luna, message: "паспорт ильи"), "none",
+                       "простой вопрос о документе — none: большая проверка 19.11.2026, 74/76 против 72/76 у low")
         XCTAssertEqual(CloudChatReasoning.auto.level(for: .luna, message: "Привет!"), "none", "болтовня — none")
         XCTAssertEqual(CloudChatReasoning.auto.level(for: .luna, message: "спасибо"), "none")
         XCTAssertEqual(CloudChatReasoning.auto.level(for: .luna, message: "посчитай, сколько у меня полисов"), "low")
@@ -298,8 +307,9 @@ final class CloudChatTests: XCTestCase {
         XCTAssertEqual(CloudChatReasoning.fast.level(for: .sol), "low", "у Sol нет none")
         XCTAssertEqual(CloudChatReasoning.auto.level(for: .astra, message: "привет"), "low")
         XCTAssertEqual(CloudChatReasoning.deep.level(for: .luna), "high")
-        XCTAssertEqual(CloudChatModel.choices(for: .openAI), [.luna, .sol, .astra, .local])
-        XCTAssertEqual(CloudChatModel.choices(for: .gemini), [.flash, .flashLite, .local])
+        // Чат только облачный (19.11.2026): «iPhone» на поле ввода не выбирают
+        XCTAssertEqual(CloudChatModel.choices(for: .openAI), [.luna, .sol, .astra])
+        XCTAssertEqual(CloudChatModel.choices(for: .gemini), [.flash, .flashLite])
 
         StubURLProtocol.reset([Gemini.text("ок")])
         _ = try await engine(.flashLite, reasoning: .fast).respond(to: "привет")
@@ -352,7 +362,7 @@ final class CloudChatTests: XCTestCase {
         XCTAssertEqual(json["model"]?.string, "gpt-6-luna")
         XCTAssertEqual(json["store"]?.bool, false, "переписка у OpenAI не хранится")
         XCTAssertEqual(json["stream"]?.bool, true)
-        XCTAssertEqual(json["reasoning"]?["effort"]?.string, "none", "«Авто» для простого вопроса у Luna — none")
+        XCTAssertEqual(json["reasoning"]?["effort"]?.string, "low", "уровень запроса постоянный — префикс кэша общий у всех разговоров")
         XCTAssertEqual(json["reasoning"]?["summary"]?.string, "auto")
         XCTAssertEqual(json["text"]?["verbosity"]?.string, "low")
         XCTAssertEqual(json["service_tier"]?.string, "fast")
@@ -361,12 +371,19 @@ final class CloudChatTests: XCTestCase {
         XCTAssertTrue(instructions.hasPrefix(CloudChatPrompt.system))
         XCTAssertTrue(instructions.contains("d1 — Паспорт (passport_ru); владелец: Савин И. А.; папка: Паспорта"), "опись с подписями — в инструкции")
         let developer = try XCTUnwrap(json["input"]?.array?.first)
-        XCTAssertEqual(developer["content"]?.array?.first?["prompt_cache_breakpoint"]?["mode"]?.string, "explicit",
-                       "общий префикс — кэш между разговорами")
+        let blocks = try XCTUnwrap(developer["content"]?.array)
+        XCTAssertEqual(blocks.count, 3, "правила, опись, дата")
+        for block in blocks.prefix(2) {
+            XCTAssertEqual(block["prompt_cache_breakpoint"], ["mode": "explicit", "ttl": "12h"], "правила и опись — кэш на 12 часов")
+        }
+        XCTAssertNil(blocks[2]["prompt_cache_breakpoint"], "дата — после отметок: её смена кэш не сбивает")
+        XCTAssertTrue(blocks[2]["text"]?.string?.contains("Сегодня") == true)
+        XCTAssertEqual(json["stream_options"]?["include_obfuscation"]?.bool, false)
         let input = conversation(json)
-        XCTAssertEqual(input.count, 1)
-        XCTAssertEqual(input[0]["role"]?.string, "user")
-        XCTAssertEqual(input[0]["content"]?.array?.first?["text"]?.string, "привет")
+        XCTAssertEqual(input.count, 2)
+        XCTAssertEqual(input[0], ["type": "configuration_update", "reasoning": ["effort": "none"]], "«Авто» для простого вопроса у Luna — none")
+        XCTAssertEqual(input[1]["role"]?.string, "user")
+        XCTAssertEqual(input[1]["content"]?.array?.first?["text"]?.string, "привет")
 
         let tools = try XCTUnwrap(json["tools"]?.array)
         XCTAssertEqual(Set(tools.compactMap { $0["name"]?.string }), ["search_documents", "list_documents", "list_folders", "list_files",
@@ -438,7 +455,8 @@ final class CloudChatTests: XCTestCase {
         let reply = try await engine(.luna).respond(to: "какие у меня паспорта")
         XCTAssertEqual(reply.text, "Нашёл паспорт.")
 
-        let input = conversation(try body(1))
+        // Уровень вопроса (configuration_update) проверяют свои тесты — здесь ход разговора
+        let input = conversation(try body(1)).filter { $0["type"]?.string != "configuration_update" }
         XCTAssertEqual(input.map { $0["type"]?.string ?? $0["role"]?.string }, ["user", "reasoning", "function_call", "function_call_output"])
         XCTAssertEqual(input[1]["encrypted_content"]?.string, "secret-reasoning", "рассуждение вернулось дословно")
         XCTAssertEqual(input[3]["call_id"]?.string, "call_1")
@@ -451,15 +469,80 @@ final class CloudChatTests: XCTestCase {
         let chat = engine(.luna)
         _ = try await chat.respond(to: "привет")
         _ = try await chat.respond(to: "сравни сроки паспортов")
-        XCTAssertEqual(try body(0)["reasoning"]?["effort"]?.string, "none")
-        XCTAssertEqual(try body(1)["reasoning"]?["effort"]?.string, "none", "поле запроса прежнее — префикс и кэш не меняются")
+        XCTAssertEqual(try body(0)["reasoning"]?["effort"]?.string, "low")
+        XCTAssertEqual(try body(1)["reasoning"]?["effort"]?.string, "low", "поле запроса прежнее — префикс и кэш не меняются")
+        XCTAssertEqual(conversation(try body(0)).first, ["type": "configuration_update", "reasoning": ["effort": "none"]],
+                       "уровень первого вопроса — тоже элементом")
         let input = conversation(try body(1))
-        let update = try XCTUnwrap(input.firstIndex { $0["type"]?.string == "configuration_update" })
+        let update = try XCTUnwrap(input.lastIndex { $0["type"]?.string == "configuration_update" })
         XCTAssertEqual(input[update]["reasoning"]?["effort"]?.string, "low")
         XCTAssertEqual(input[update + 1]["role"]?.string, "user")
         XCTAssertEqual(input[update + 1]["content"]?.array?.first?["text"]?.string, "сравни сроки паспортов")
         XCTAssertEqual(Array(input[..<update]), conversation(try body(0)) + [OpenAI.message("Привет!")],
                        "прежняя история — дословно")
+    }
+
+    /// Тот же вопрос в новом чате — те же байты. Словарь Swift перебирается в
+    /// случайном порядке, и без сортировки ключей схемы инструментов уходили
+    /// каждый раз по-новому: кэш OpenAI не срабатывал ни разу (19.11.2026)
+    func testOpenAIRequestBytesAreStableForCache() async throws {
+        StubURLProtocol.reset([OpenAI.text("Привет!"), OpenAI.text("Привет!"), OpenAI.text("Сравнил.")])
+        for question in ["привет", "привет", "сравни сроки паспортов"] {
+            let chat = engine(.luna)
+            chat.genUI = true
+            chat.documentIndex = "d1 · passport_ru · Паспорт · Савин И. А. · Паспорта"
+            _ = try await chat.respond(to: question)
+        }
+        let bodies = try StubURLProtocol.requests.map { try XCTUnwrap($0.httpBody) }
+        XCTAssertEqual(bodies[0], bodies[1], "тот же вопрос в новом чате — байт в байт")
+        let first = try body(0), third = try body(2)
+        for key in ["model", "tools", "text", "reasoning", "service_tier", "prompt_cache_options"] {
+            XCTAssertEqual(first[key], third[key], "\(key) — часть кэшируемого префикса")
+        }
+        XCTAssertEqual(first["input"]?.array?.first, third["input"]?.array?.first, "инструкция и опись — те же")
+    }
+
+    /// Прогрев: тот же префикс без вопроса и без ответа модели; второй раз —
+    /// только когда префикс изменился
+    func testOpenAIPrewarmSendsPrefixOnceUntilItChanges() async throws {
+        UserDefaults.standard.removeObject(forKey: "chat.warmPrefix.key")
+        UserDefaults.standard.removeObject(forKey: "chat.warmPrefix.until")
+        let warmed: CloudJSON = ["id": "resp_w", "status": "completed", "output": [],
+                                 "usage": ["input_tokens": 2000, "output_tokens": 0,
+                                           "input_tokens_details": ["cached_tokens": 0, "cache_write_tokens": 2000,
+                                                                    "cache_write_tokens_details": ["ttl_12h_tokens": 1990, "ttl_30m_tokens": 10]]]]
+        StubURLProtocol.reset([StubURLProtocol.Reply(status: 200, body: warmed.data), OpenAI.text("Привет!"),
+                               StubURLProtocol.Reply(status: 200, body: warmed.data)])
+        let chat = engine(.luna)
+        chat.genUI = true
+        chat.documentIndex = "d1 · passport_ru · Паспорт · Савин И. А. · Паспорта"
+        await chat.prewarm()
+        await chat.prewarm()
+        XCTAssertEqual(StubURLProtocol.requests.count, 1, "префикс уже прогрет")
+        XCTAssertEqual(chat.usage.longCacheWriteTokens, 1990)
+        _ = try await chat.respond(to: "привет")
+        let warm = try body(0), question = try body(1)
+        XCTAssertEqual(warm["prompt_cache_options"]?["prewarm"]?.bool, true)
+        XCTAssertNil(warm["stream"], "ответа нет — потока тоже")
+        XCTAssertEqual(warm["input"]?.array, [try XCTUnwrap(question["input"]?.array?.first)], "только инструкция и опись")
+        for key in ["model", "tools", "text", "reasoning", "service_tier"] {
+            XCTAssertEqual(warm[key], question[key], "\(key) — как у вопроса, иначе прогрев не пригодится")
+        }
+        chat.documentIndex += "\nd2 · passport_intl · Загранпаспорт · Савин И. А. · Паспорта"
+        await chat.prewarm()
+        XCTAssertEqual(StubURLProtocol.requests.count, 3, "опись изменилась — прогрев заново")
+    }
+
+    /// Ответ одной карточкой интерфейса — ответ, а не пустота: в его JSON нет
+    /// кириллицы, и прежняя проверка просила модель ответить заново, а та
+    /// затирала карточку («Не нашёл, что ответить», 19.11.2026)
+    func testInterfaceAnswerWithOnlyCardIsNotEmpty() {
+        let card = #"{"version":1,"mode":"ui","text":"","state":[],"computed":[],"blocks":[{"id":"p","type":"app_card","card":{"kind":"fields","document_id":"d1","keys":["full_name"]}}]}"#
+        XCTAssertFalse(CloudChatEngine.isEmptyAnswer(card, genUI: true))
+        XCTAssertTrue(CloudChatEngine.isEmptyAnswer(#"{"version":1,"mode":"text","text":" ","state":[],"computed":[],"blocks":[]}"#, genUI: true))
+        XCTAssertTrue(CloudChatEngine.isEmptyAnswer("", genUI: false))
+        XCTAssertTrue(CloudChatEngine.isEmptyAnswer("Done", genUI: false), "ответ по-русски без единой буквы кириллицы — пустой")
+        XCTAssertFalse(CloudChatEngine.isEmptyAnswer("Готово", genUI: false))
     }
 
     func testOpenAIDropsSummaryWhenOrganizationIsNotVerified() async throws {
@@ -483,7 +566,7 @@ final class CloudChatTests: XCTestCase {
         XCTAssertEqual(reply.text, "ок")
         XCTAssertNotNil(instructions(try body(0)))
         XCTAssertTrue(try body(1)["instructions"]?.string?.hasPrefix(CloudChatPrompt.system) == true, "повтор — прежней инструкцией")
-        XCTAssertEqual(conversation(try body(1)).count, 1)
+        XCTAssertEqual(conversation(try body(1)).map { $0["type"]?.string ?? $0["role"]?.string }, ["configuration_update", "user"])
     }
 
     func testOpenAIStreamErrorsMapToCauses() async throws {
@@ -568,7 +651,7 @@ final class CloudChatTests: XCTestCase {
         try await finish(session)
         XCTAssertEqual(StubURLProtocol.requests.count, 1, "«Подумать» — всегда облако")
         XCTAssertEqual(session.messages.last?.text, "Подумал.")
-        XCTAssertEqual(try body(0)["reasoning"]?["effort"]?.string, "high")
+        XCTAssertEqual(effort(try body(0)), "high")
 
         let (open, openSearch) = cloudSession()
         let id = try await indexPassport(in: openSearch)
@@ -578,7 +661,8 @@ final class CloudChatTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.requests.count, 1)
         let instructions = try XCTUnwrap(self.instructions(try body(0)))
         XCTAssertTrue(instructions.contains("d\(id) — ") && instructions.contains("(passport_ru)"), instructions)
-        XCTAssertTrue(instructions.contains("Савин И. А."), "владелец — фамилия и инициалы")
+        XCTAssertTrue(instructions.contains("владелец: Савин Илья Андреевич"),
+                      "владелец — полным именем: «Ольга» находится по описи, без поиска (19.11.2026)")
         for number in ["4601", "123456", "770-120"] {
             XCTAssertFalse(instructions.contains(number), "в описи нет номеров: \(number)")
         }
@@ -742,6 +826,28 @@ final class DocumentMetadataTests: XCTestCase {
         // Поиск находит документ по организации из метаданных
         let found = await search.search("ромашка")
         XCTAssertEqual(found.first?.file.name, "договор.txt")
+    }
+
+    /// Опись для облака: сведения из метаданных — чтобы ответить без поиска;
+    /// идентификаторы — никогда. Модели на iPhone — короткая опись
+    func testDetailedIndexHasMetadataButNoIdentifiers() async throws {
+        StubURLProtocol.reset([Self.contractReply])
+        let search = service()
+        store.createFolder(name: "Работа", icon: "folder.fill", color: "indigo")
+        store.importData(Data("ТРУДОВОЙ ДОГОВОР\nработник обязуется".utf8), preferredName: "договор.txt", to: try XCTUnwrap(store.folders.last))
+        search.reconcile()
+        await search.waitUntilIdle()
+
+        let index = await search.chatDocumentIndex(details: true)
+        for part in ["от 01.02.2024", "до 31.12.2026", "кратко: Договор о приёме на работу.", "люди: Петров Иван — работник",
+                     "организации: ООО «Ромашка»", "суммы: Оклад 120 000 RUB", "теги: работа, договор"] {
+            XCTAssertTrue(index.contains(part), "\(part) — \(index)")
+        }
+        XCTAssertFalse(index.contains("1234567"), "номер договора — только маской через инструменты")
+        let labeled = LocalAgentPrompt.labeled(index, withType: true)
+        XCTAssertTrue(labeled.contains("; действует до 31.12.2026; от 01.02.2024; кратко:"), labeled)
+        let short = await search.chatDocumentIndex()
+        XCTAssertFalse(short.contains("кратко:"), "модели на iPhone — короткая опись")
     }
 
     func testIdentifiersAreMaskedInChatText() async throws {

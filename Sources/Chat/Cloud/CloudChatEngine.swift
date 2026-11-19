@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import OSLog
 
@@ -49,9 +50,11 @@ enum CloudChatModel: String, CaseIterable, Sendable {
         }
     }
 
-    /// Что предложить на поле ввода: модели выбранного сервиса и «iPhone»
+    /// Что предложить на поле ввода: модели выбранного сервиса. «iPhone» не
+    /// выбирают — чат только облачный (владелец 19.11.2026); без ключа и
+    /// связи отвечают правила на iPhone сами
     static func choices(for provider: CloudProvider) -> [CloudChatModel] {
-        allCases.filter { $0.provider == provider || $0 == .local }
+        allCases.filter { $0.provider == provider }
     }
 
     /// Luna — самая быстрая и дешёвая из GPT-6 ($0.1/$0.5 за миллион токенов)
@@ -96,9 +99,13 @@ enum CloudChatReasoning: String, CaseIterable, Sendable {
         let complex = Self.isComplex(message) || hasAttachments || (interface && Self.wantsInterface(message))
         switch (self, model) {
         case (.deep, _): return "high"
-        // Любой вопрос о документах Luna думает на low: с none она угадывала,
-        // чей «мой паспорт» (жалоба владельца 13.10.2026). none — только болтовня
-        case (.auto, .luna): return complex || !Self.isSmallTalk(message) ? "low" : "none"
+        // Простой вопрос — none, сложный и интерфейс — low. Большая проверка
+        // 19.11.2026 (опись в инструкции, 38 вопросов × 2): none — 74/76 и p90
+        // первого ответа 3,2 с, low — 72/76 и 4,0 с. Прежде любой вопрос о
+        // документах шёл на low: с none Luna угадывала, чей «мой паспорт»
+        // (13.10.2026) — теперь владельца знает инструкция, а без него правила
+        // спрашивают «Чей?» до облака
+        case (.auto, .luna): return complex ? "low" : "none"
         case (.fast, .luna): return "none"
         case (.fast, .flashLite): return "minimal"
         case (.fast, _): return "low"
@@ -114,14 +121,6 @@ enum CloudChatReasoning: String, CaseIterable, Sendable {
         let stems = ["сколько", "категор", "график", "диаграм", "таблиц", "сводк", "обзор", "что с мо", "подбер", "подобр",
                      "какие документы", "калькул", "ипотек", "кредит", "вклад", "платёж", "платеж", "бюджет", "поездк"]
         return stems.contains { lower.contains($0) }
-    }
-
-    /// Приветствие, спасибо, «ок» — думать не о чем
-    static func isSmallTalk(_ message: String) -> Bool {
-        let words = SearchText.tokens(in: message).map(\.word)
-        let small: Set<String> = ["привет", "здравствуй", "здравствуйте", "спасибо", "благодарю", "ок", "окей", "пока",
-                                  "хорошо", "понятно", "ясно", "да", "нет", "добрый", "день", "вечер", "утро", "как", "дела", "отлично", "супер"]
-        return !words.isEmpty && words.count <= 4 && words.allSatisfy(small.contains)
     }
 
     /// Сложный вопрос: длинный или просит сравнить, посчитать, проанализировать,
@@ -193,9 +192,23 @@ final class CloudChatEngine {
         character.unicodeScalars.contains { (0x0400...0x04FF).contains($0.value) }
     }
 
+    /// Пустой ответ. Текстом — ни одной буквы кириллицы. Интерфейсом — ни
+    /// текста, ни блоков: карточка app_card без подписи — уже ответ, хоть в её
+    /// JSON и нет кириллицы (живая проверка 19.11.2026: такой ответ считался
+    /// пустым, повторная просьба затирала карточку — «Не нашёл, что ответить»)
+    static func isEmptyAnswer(_ answer: String, genUI: Bool) -> Bool {
+        if genUI, let json = try? JSONValue(parsing: answer), json["version"] != nil || json["blocks"] != nil {
+            let text = json["text"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return text.isEmpty && (json["blocks"]?.array ?? []).isEmpty
+        }
+        return !answer.contains(where: isCyrillic)
+    }
+
     /// Опись документов для системной инструкции: id, вид, название, владелец,
     /// папка — без номеров. Стабильный префикс запроса: на нём работает кэш
     var documentIndex = ""
+    /// Папки для облака: id · путь · файлов (SearchService.chatFolderIndex)
+    var folderIndex = ""
     /// Финальный ответ — интерфейсом: JSON по схеме Generative UI
     /// (docs/genui.md). Текст ответа тогда приходит событиями answerDelta
     var genUI = false
@@ -233,6 +246,58 @@ final class CloudChatEngine {
         self.session = session
         self.search = search
         tools = CloudChatTools(search: search, proposals: proposals)
+    }
+
+    /// Инструкция этого разговора частями — та же, что уйдёт с вопросом
+    private func systemParts(genUI: Bool) -> CloudChatSystem {
+        Self.parts(documentIndex, genUI: genUI, owner: ownerName, facts: CloudChatFactTools.index(facts), folders: folderIndex)
+    }
+
+    /// Прогреть кэш префикса: правила, опись, инструменты и схема ответа
+    /// уходят заранее, без вопроса, и первый вопрос не ждёт их разбора.
+    /// Запись живёт 12 часов: прогрев повторяется, только когда префикс
+    /// изменился (документы, владелец, модель) или срок подходит к концу.
+    /// Ошибка прогрева ничего не ломает — вопрос просто прочтёт префикс сам
+    func prewarm(now: Date = Date()) async {
+        prepareHistory()
+        var state = dialectState
+        if state.baseLevel == nil, configuration.provider == .openAI { state.baseLevel = OpenAIChatDialect.baseLevel }
+        var options = options
+        options.fastTier = options.fastTier && fastTier
+        let genUI = genUI && options.genUI
+        let system = systemParts(genUI: genUI)
+        // Отметка — по всему, что входит в кэшируемый префикс, кроме даты: она
+        // идёт после отметок кэша, и её смена прогрева не требует
+        var undated = system
+        undated.today = ""
+        guard let request = dialect.prewarmRequest(system: system, configuration: configuration, state: state, options: options, genUI: genUI),
+              let body = dialect.prewarmRequest(system: undated, configuration: configuration, state: state, options: options, genUI: genUI)?.httpBody
+        else { return }
+        let key = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+        if let warm = Self.warmPrefix, warm.key == key, warm.until > now { return }
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            if let usage = CloudJSON.parse(data)?["usage"] { self.usage += CloudChatUsage(usage: usage) }
+            Self.warmPrefix = (key, now.addingTimeInterval(Self.warmLifetime))
+        } catch {
+            return
+        }
+    }
+
+    /// Отметка «префикс прогрет»: хеш тела прогрева и до каких пор. Запись в
+    /// кэш живёт не меньше 12 часов — повтор чуть раньше, с запасом
+    static let warmLifetime: TimeInterval = 11 * 3600
+    private static var warmPrefix: (key: String, until: Date)? {
+        get {
+            guard let key = UserDefaults.standard.string(forKey: "chat.warmPrefix.key"),
+                  let until = UserDefaults.standard.object(forKey: "chat.warmPrefix.until") as? Date else { return nil }
+            return (key, until)
+        }
+        set {
+            UserDefaults.standard.set(newValue?.key, forKey: "chat.warmPrefix.key")
+            UserDefaults.standard.set(newValue?.until, forKey: "chat.warmPrefix.until")
+        }
     }
 
     func reset() {
@@ -342,8 +407,7 @@ final class CloudChatEngine {
             let request = {
                 var options = self.options
                 options.fastTier = options.fastTier && self.fastTier
-                return dialect.request(history: items, system: Self.system(self.documentIndex, genUI: genUI && self.options.genUI, owner: self.ownerName,
-                                                                         facts: CloudChatFactTools.index(self.facts)),
+                return dialect.request(history: items, system: self.systemParts(genUI: genUI && self.options.genUI),
                                        configuration: self.configuration, level: level, state: state, options: options,
                                        genUI: genUI && self.options.genUI)
             }
@@ -373,7 +437,7 @@ final class CloudChatEngine {
             // Пустой ответ без карточек — модель потеряла нить: ещё один раунд
             // с подсказкой. Живая проверка 25.10.2026: «запомни: …» — пустой
             // ответ в 1 из 5. Ответ по-русски без единой буквы кириллицы — пустой
-            if turn.calls.isEmpty, !nudged, round.cards.isEmpty, !round.answer.contains(where: Self.isCyrillic) {
+            if turn.calls.isEmpty, !nudged, round.cards.isEmpty, Self.isEmptyAnswer(round.answer, genUI: genUI && self.options.genUI) {
                 nudged = true
                 items = dialect.appending(user: Self.emptyAnswerNudge, attachments: [], level: level, to: items, state: &state)
                 continue
@@ -425,18 +489,27 @@ final class CloudChatEngine {
 
     /// `facts` — опись «Карточек» без значений (CloudChatFactTools.index)
     static func system(_ index: String, genUI: Bool = false, owner: String? = nil, facts: String = "", today: Date = Date()) -> String {
+        parts(index, genUI: genUI, owner: owner, facts: facts, today: today).text
+    }
+
+    /// Инструкция частями: правила, хранилище, дата — от редко меняющегося к
+    /// ежедневному (CloudChatSystem)
+    static func parts(_ index: String, genUI: Bool = false, owner: String? = nil, facts: String = "", folders: String = "",
+                      today: Date = Date()) -> CloudChatSystem {
         // Чей «мой паспорт»: модель не угадывает владельца по документам
-        let ownerLine = owner.map { "Владелец хранилища: \($0). «Мой», «моя», «мне» — о его документах." }
+        let ownerLine = owner.map { "Владелец хранилища: \($0). «Мой паспорт», «мои права», «мне» — о его документах; «сколько у меня … и чьи», «что у меня есть» — обо всём хранилище." }
             ?? "Владелец хранилища неизвестен. На «мой паспорт», «мои документы» при документах нескольких людей не угадывай — спроси, чей, вариантами с именами."
         // Без даты модель считала возраст от своего года: «Ольге 33 года (по
         // состоянию на 2025 год)» 26.10.2026 (живая проверка C2)
         let day = Calendar(identifier: .gregorian).dateComponents([.day, .month, .year], from: today)
         let dateLine = String(format: "Сегодня %02d.%02d.%04d — возраст и сроки считай от этой даты.", day.day ?? 1, day.month ?? 1, day.year ?? 2026)
-        let base = (genUI ? CloudChatGenUI.system : CloudChatPrompt.system) + "\n" + ownerLine + "\n" + dateLine + "\n" + CloudChatFactTools.instruction
+        let rules = (genUI ? CloudChatGenUI.system : CloudChatPrompt.system) + "\n" + CloudChatFactTools.instruction
         let lines = index.split(separator: "\n").map { LocalAgentPrompt.labeled(String($0), withType: true) }
-        var prompt = lines.isEmpty ? base : base + "\n\nДокументы хранилища:\n" + lines.joined(separator: "\n")
-        if !facts.isEmpty { prompt += "\n\nКарточки (id · название · поля):\n" + facts }
-        return prompt
+        var vault = ownerLine
+        if !lines.isEmpty { vault += "\n\nДокументы хранилища:\n" + lines.joined(separator: "\n") }
+        if !folders.isEmpty { vault += "\n\nПапки (id · путь · файлов) — для переноса берите id отсюда, без list_folders:\n" + folders }
+        if !facts.isEmpty { vault += "\n\nКарточки (id · название · поля):\n" + facts }
+        return CloudChatSystem(rules: rules, vault: vault, today: dateLine)
     }
 
     // MARK: - Поток
@@ -528,19 +601,56 @@ struct CloudChatUsage: Equatable, Sendable {
     var inputTokens = 0
     /// Из них прочитано из кэша
     var cachedTokens = 0
+    /// Из них записано в кэш: на 30 минут — 1,25× цены входа, на 12 часов — 2,5×
+    var cacheWriteTokens = 0
+    var longCacheWriteTokens = 0
     var outputTokens = 0
+
+    /// usage ответа OpenAI: input_tokens_details.cached_tokens — прочитанное,
+    /// cache_write_tokens — записанное, по срокам в cache_write_tokens_details
+    init(usage: CloudJSON) {
+        requests = 1
+        inputTokens = usage["input_tokens"]?.int ?? 0
+        cachedTokens = usage["input_tokens_details"]?["cached_tokens"]?.int ?? 0
+        cacheWriteTokens = usage["input_tokens_details"]?["cache_write_tokens"]?.int ?? 0
+        longCacheWriteTokens = usage["input_tokens_details"]?["cache_write_tokens_details"]?["ttl_12h_tokens"]?.int ?? 0
+        outputTokens = usage["output_tokens"]?.int ?? 0
+    }
+
+    init(requests: Int = 0, inputTokens: Int = 0, cachedTokens: Int = 0, outputTokens: Int = 0) {
+        self.requests = requests
+        self.inputTokens = inputTokens
+        self.cachedTokens = cachedTokens
+        self.outputTokens = outputTokens
+    }
 
     static func += (lhs: inout CloudChatUsage, rhs: CloudChatUsage) {
         lhs.requests += rhs.requests
         lhs.inputTokens += rhs.inputTokens
         lhs.cachedTokens += rhs.cachedTokens
+        lhs.cacheWriteTokens += rhs.cacheWriteTokens
+        lhs.longCacheWriteTokens += rhs.longCacheWriteTokens
         lhs.outputTokens += rhs.outputTokens
     }
 }
 
-/// Уровень рассуждения OpenAI: на уровне запроса — тот, с которого начался
-/// разговор, а смена — элементом configuration_update в истории. Поле
-/// запроса входит в кэшируемый префикс, и его смена сбросила бы кэш
+/// Системная инструкция частями. У OpenAI это три блока сообщения developer:
+/// правила неизменны, опись хранилища меняется вместе с документами, дата —
+/// раз в сутки. Правила и опись — каждый со своей отметкой кэша на 12 часов,
+/// дата — после них: её смена кэш не сбивает (docs/cloud-chat.md, «Кэш»)
+struct CloudChatSystem: Equatable, Sendable {
+    var rules: String
+    var vault: String
+    var today: String
+
+    /// Одной строкой — для Gemini и для «instructions», если отметки кэша не приняты
+    var text: String { [rules, vault, today].filter { !$0.isEmpty }.joined(separator: "\n\n") }
+}
+
+/// Уровень рассуждения OpenAI: на уровне запроса — постоянный для модели
+/// (CloudChatModel.baseLevel), а уровень вопроса — элементом
+/// configuration_update перед ним. Поле запроса входит в кэшируемый префикс:
+/// его смена от разговора к разговору сбрасывала бы кэш
 /// (developers.openai.com: reasoning, «Change reasoning mid-conversation»)
 struct CloudChatDialectState: Equatable {
     var baseLevel: String?
@@ -571,8 +681,11 @@ protocol CloudChatDialect {
                    state: inout CloudChatDialectState) -> [CloudJSON]
     /// Вопрос и ответ, данный без облака
     func appending(note question: String, answer: String, to history: [CloudJSON]) -> [CloudJSON]
-    func request(history: [CloudJSON], system: String, configuration: CloudChatEngine.Configuration, level: String,
+    func request(history: [CloudJSON], system: CloudChatSystem, configuration: CloudChatEngine.Configuration, level: String,
                  state: CloudChatDialectState, options: CloudChatOptions, genUI: Bool) -> URLRequest
+    /// Прогрев кэша префикса без ответа модели. nil — сервис так не умеет
+    func prewarmRequest(system: CloudChatSystem, configuration: CloudChatEngine.Configuration, state: CloudChatDialectState,
+                        options: CloudChatOptions, genUI: Bool) -> URLRequest?
     func read<Lines: AsyncSequence>(_ lines: Lines, onDelta: (CloudChatDelta) -> Void,
                                     onCall: (CloudChatCall) async -> Void) async throws -> CloudChatTurn where Lines.Element == String
     func appending(turn: CloudChatTurn, to history: [CloudJSON]) -> [CloudJSON]
@@ -642,17 +755,23 @@ struct GeminiChatDialect: CloudChatDialect {
         return contents
     }
 
-    func request(history: [CloudJSON], system: String, configuration: CloudChatEngine.Configuration, level: String,
+    func request(history: [CloudJSON], system: CloudChatSystem, configuration: CloudChatEngine.Configuration, level: String,
                  state: CloudChatDialectState, options: CloudChatOptions, genUI: Bool) -> URLRequest {
         let model = configuration.model.provider == .gemini ? configuration.model.rawValue : CloudChatModel.flash.rawValue
         let body: CloudJSON = [
-            "system_instruction": ["parts": [["text": .string(system)]]],
+            "system_instruction": ["parts": [["text": .string(system.text)]]],
             "contents": .array(history),
             "tools": [["functionDeclarations": CloudChatPrompt.tools]],
             "generationConfig": ["thinkingConfig": ["includeThoughts": true, "thinkingLevel": .string(level)]],
         ]
         return streamRequest("\(baseURL(configuration))/models/\(model):streamGenerateContent?alt=sse",
                              apiKey: ("x-goog-api-key", configuration.apiKey), body: body.data)
+    }
+
+    /// У Gemini прогрева префикса нет
+    func prewarmRequest(system: CloudChatSystem, configuration: CloudChatEngine.Configuration, state: CloudChatDialectState,
+                        options: CloudChatOptions, genUI: Bool) -> URLRequest? {
+        nil
     }
 
     /// Каждая строка «data: …» — GenerateContentResponse. Части копятся
@@ -722,12 +841,17 @@ struct GeminiChatDialect: CloudChatDialect {
 /// (encrypted_content), иначе модель теряет ход мысли между вызовами
 /// инструментов. Инструменты — строгие (strict), как советует документация
 struct OpenAIChatDialect: CloudChatDialect {
+    /// Уровень рассуждения на уровне запроса — один для всех разговоров: так
+    /// префикс кэша общий. «low» — самый частый уровень вопроса у «Авто», и у
+    /// Sol и Astra нет «none». Другой уровень вопроса — configuration_update
+    /// перед ним, даже у первого вопроса (проверено на API 19.11.2026)
+    static let baseLevel = "low"
+
     func appending(user text: String, attachments: [CloudChatAttachment], level: String, to history: [CloudJSON],
                    state: inout CloudChatDialectState) -> [CloudJSON] {
         var items = history
-        if state.baseLevel == nil {
-            state.baseLevel = level
-        } else if (state.currentLevel ?? state.baseLevel) != level {
+        if state.baseLevel == nil { state.baseLevel = Self.baseLevel }
+        if (state.currentLevel ?? state.baseLevel) != level {
             items.append(["type": "configuration_update", "reasoning": ["effort": .string(level)]])
         }
         state.currentLevel = level
@@ -746,42 +870,66 @@ struct OpenAIChatDialect: CloudChatDialect {
         ]
     }
 
-    func request(history: [CloudJSON], system: String, configuration: CloudChatEngine.Configuration, level: String,
+    func request(history: [CloudJSON], system: CloudChatSystem, configuration: CloudChatEngine.Configuration, level: String,
                  state: CloudChatDialectState, options: CloudChatOptions, genUI: Bool) -> URLRequest {
         var input = history
-        var effort = state.baseLevel ?? level
+        var effort = state.baseLevel ?? Self.baseLevel
         if !options.configurationUpdates {
             // Без configuration_update уровень меняется полем запроса
             input = input.filter { $0["type"]?.string != "configuration_update" }
             effort = state.currentLevel ?? level
         }
+        var body = Self.body(system: system, configuration: configuration, effort: effort, options: options, genUI: genUI)
+        if options.cacheBreakpoint {
+            body["input"] = .array([Self.developer(system)] + input)
+        } else {
+            body["input"] = .array(input)
+            body["instructions"] = .string(system.text)
+        }
+        body["stream"] = true
+        // Без случайной «обфускации» в каждом событии потока — меньше байт
+        // через VPN (справочник POST /responses, stream_options)
+        body["stream_options"] = ["include_obfuscation": false]
+        return streamRequest("\(baseURL(configuration))/responses", apiKey: ("Authorization", "Bearer \(configuration.apiKey)"),
+                             body: genUI ? CloudChatGenUI.body(.object(body)) : CloudJSON.object(body).data)
+    }
+
+    /// Прогрев кэша: тот же префикс — инструменты, схема ответа, инструкция и
+    /// опись — без вопроса и без ответа модели (prompt_cache_options.prewarm).
+    /// Первый вопрос после него не ждёт, пока сервер прочтёт ~20 тыс. токенов
+    func prewarmRequest(system: CloudChatSystem, configuration: CloudChatEngine.Configuration, state: CloudChatDialectState,
+                        options: CloudChatOptions, genUI: Bool) -> URLRequest? {
+        guard options.cacheBreakpoint, options.configurationUpdates else { return nil }
+        var body = Self.body(system: system, configuration: configuration, effort: state.baseLevel ?? Self.baseLevel, options: options, genUI: genUI)
+        body["input"] = [Self.developer(system)]
+        body["prompt_cache_options"] = ["mode": "implicit", "prewarm": true]
+        return streamRequest("\(baseURL(configuration))/responses", apiKey: ("Authorization", "Bearer \(configuration.apiKey)"),
+                             body: genUI ? CloudChatGenUI.body(.object(body)) : CloudJSON.object(body).data)
+    }
+
+    /// Всё, что входит в кэшируемый префикс, кроме сообщений: у вопроса и у
+    /// прогрева одно и то же — иначе прогрев не пригодится
+    private static func body(system: CloudChatSystem, configuration: CloudChatEngine.Configuration, effort: String,
+                             options: CloudChatOptions, genUI: Bool) -> [String: CloudJSON] {
         var reasoning: [String: CloudJSON] = ["effort": .string(effort)]
         if options.summaries { reasoning["summary"] = "auto" }
         var body: [String: CloudJSON] = [
             "model": .string(configuration.model.provider == .openAI ? configuration.model.rawValue : CloudChatModel.luna.rawValue),
-            "input": .array(input),
-            "tools": genUI ? Self.genUITools : Self.tools,
+            "tools": genUI ? genUITools : tools,
             "reasoning": .object(reasoning),
             // Коротко — меньше токенов, быстрее ответ (API deployment checklist).
             // Интерфейсом — строгий JSON по схеме Generative UI
             "text": genUI ? ["verbosity": "low", "format": CloudChatGenUI.textFormat] : ["verbosity": "low"],
-            "stream": true,
             "store": false,
             "max_output_tokens": 16_000,
         ]
+        // Правила и опись — отметками кэша на 12 часов (developer), разговор —
+        // неявной отметкой в конце последнего сообщения на 30 минут
+        if options.cacheBreakpoint { body["prompt_cache_options"] = ["mode": "implicit"] }
         // Быстрый режим: до 2,5× быстрее за двойную цену. У Luna это $0.2 за
         // миллион токенов входа — копейки за ответ без ожидания
-        if options.cacheBreakpoint {
-            // Инструменты, инструкция и опись — общий префикс всех запросов:
-            // отметка в конце инструкции делает его кэшем на 30 минут
-            body["input"] = .array([Self.developer(system)] + input)
-            body["prompt_cache_options"] = ["mode": "implicit"]
-        } else {
-            body["instructions"] = .string(system)
-        }
         if configuration.model == .luna, options.fastTier { body["service_tier"] = "fast" }
-        return streamRequest("\(baseURL(configuration))/responses", apiKey: ("Authorization", "Bearer \(configuration.apiKey)"),
-                             body: genUI ? CloudChatGenUI.body(.object(body)) : CloudJSON.object(body).data)
+        return body
     }
 
     /// Инструменты в формате Responses API: строгие схемы — все поля
@@ -796,9 +944,18 @@ struct OpenAIChatDialect: CloudChatDialect {
         ]
     })
 
-    /// Системная инструкция сообщением developer с явной отметкой кэша
-    static func developer(_ system: String) -> CloudJSON {
-        ["role": "developer", "content": [["type": "input_text", "text": .string(system), "prompt_cache_breakpoint": ["mode": "explicit"]]]]
+    /// Системная инструкция сообщением developer: правила и опись — блоками с
+    /// явной отметкой кэша на 12 часов, дата — после них. Без отдельной отметки
+    /// после неизменного начала кэш срабатывал только на запросе целиком
+    /// (prompt caching, «A shared prefix is not always a cached prefix»)
+    static func developer(_ system: CloudChatSystem) -> CloudJSON {
+        let breakpoint: CloudJSON = ["mode": "explicit", "ttl": "12h"]
+        var content: [CloudJSON] = [["type": "input_text", "text": .string(system.rules), "prompt_cache_breakpoint": breakpoint]]
+        if !system.vault.isEmpty {
+            content.append(["type": "input_text", "text": .string("\n\n" + system.vault), "prompt_cache_breakpoint": breakpoint])
+        }
+        content.append(["type": "input_text", "text": .string("\n\n" + system.today)])
+        return ["role": "developer", "content": .array(content)]
     }
 
     /// Для ответа интерфейсом — без show_cards: карточки документов — блоки app_card
@@ -835,9 +992,7 @@ struct OpenAIChatDialect: CloudChatDialect {
             case "response.completed", "response.incomplete":
                 if let output = json["response"]?["output"]?.array, !output.isEmpty { completed = output }
                 if let usage = json["response"]?["usage"] {
-                    tokens = CloudChatUsage(requests: 1, inputTokens: usage["input_tokens"]?.int ?? 0,
-                                            cachedTokens: usage["input_tokens_details"]?["cached_tokens"]?.int ?? 0,
-                                            outputTokens: usage["output_tokens"]?.int ?? 0)
+                    tokens = CloudChatUsage(usage: usage)
                 }
             case "response.failed":
                 throw Self.failure(json["response"]?["error"])

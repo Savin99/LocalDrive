@@ -50,7 +50,10 @@ enum LocalAgentPrompt {
         var text = "\(parts[0]) — \(parts[2])" + (withType ? " (\(parts[1]))" : "")
         if parts[3] != "—" { text += "; владелец: \(parts[3])" }
         text += "; папка: \(parts[4])"
-        if parts.count > 5 { text += "; действует \(parts[5])" }
+        // Дальше — срок («до …») и, в описи для облака, поля и сведения
+        for part in parts.dropFirst(5) {
+            text += part.hasPrefix("до ") ? "; действует \(part)" : "; \(part)"
+        }
         return text
     }
 

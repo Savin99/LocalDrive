@@ -62,6 +62,10 @@ final class CloudRecognitionStore {
         static let chat = "cloud.chatEnabled"
         static let chatModel = "chat.model"
         static let chatReasoning = "chat.reasoning"
+        /// Первый ключ уже включил чат и распознавание — второй раз не включает
+        static let autoEnabled = "cloud.autoEnabled"
+        /// Переход на «только облако» сделан: «iPhone» на поле ввода сброшен
+        static let cloudFirst = "chat.cloudFirst"
     }
 
     /// Прежний общий ключ. Ключи сервисов — «<этот адрес>.openai» и «….gemini»
@@ -121,6 +125,19 @@ final class CloudRecognitionStore {
         if !defaults.bool(forKey: Key.openAIDefault) {
             defaults.set(CloudProvider.openAI.rawValue, forKey: Key.provider)
             defaults.set(true, forKey: Key.openAIDefault)
+        }
+        // Решение владельца 19.11.2026: чат — только облако. Выбранный раньше
+        // «iPhone» сбрасывается один раз — дальше отвечает модель сервиса
+        if !defaults.bool(forKey: Key.cloudFirst) {
+            if defaults.string(forKey: Key.chatModel) == CloudChatModel.local.rawValue { defaults.removeObject(forKey: Key.chatModel) }
+            // Ключ уже сохранён — чат через облако включается сам, как у нового
+            // ключа. Распознавание остаётся, как его настроил владелец
+            let provider = defaults.string(forKey: Key.provider).flatMap(CloudProvider.init(stored:)) ?? .openAI
+            if Keychain.get(service: keyService(keychainService, provider)) != nil {
+                defaults.set(true, forKey: Key.chat)
+                defaults.set(true, forKey: Key.autoEnabled)
+            }
+            defaults.set(true, forKey: Key.cloudFirst)
         }
     }
 
@@ -221,12 +238,22 @@ final class CloudRecognitionStore {
         changed()
     }
 
-    /// Ключ выбранного сервиса
+    /// Ключ выбранного сервиса. Первый ключ включает и чат через облако, и
+    /// распознавание: «вставил ключ — всё работает» (владелец 19.11.2026).
+    /// Выключенное потом вручную повторный ключ не включает
     func setKey(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         Keychain.set(Data(trimmed.utf8), service: Self.keyService(keychainService, provider))
         hasKey = true
+        if !defaults.bool(forKey: Key.autoEnabled) {
+            defaults.set(true, forKey: Key.autoEnabled)
+            if !chatEnabled { setChatEnabled(true) }
+            if !isEnabled {
+                isEnabled = true
+                defaults.set(true, forKey: Key.enabled)
+            }
+        }
         changed()
     }
 

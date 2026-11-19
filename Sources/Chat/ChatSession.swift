@@ -179,7 +179,8 @@ final class ChatSession {
     /// ответить правилами
     @ObservationIgnored private let agentTimeout: Duration
     /// Облачный чат: одна переписка на сессию, только в памяти
-    @ObservationIgnored private var cloudEngine: CloudChatEngine?
+    @ObservationIgnored private(set) var cloudEngine: CloudChatEngine?
+    @ObservationIgnored private var isPrewarming = false
     @ObservationIgnored private let cloudSession: URLSession
     /// Сколько ждать облако целиком, со всеми раундами инструментов
     @ObservationIgnored private let cloudTimeout: Duration
@@ -319,7 +320,8 @@ final class ChatSession {
             }
             // «В фамилии ошибка», «исправь дату рождения на 12.05.1985» —
             // карточка «было → станет» с «Принять» и «Отклонить»
-            if documentID == nil, attachments.isEmpty, let reply = await self.fieldFixReply(trimmed, context: context, steps: steps) {
+            if documentID == nil, attachments.isEmpty,
+               let reply = await self.fieldFixReply(trimmed, context: context, delegates: configuration != nil || model != nil, steps: steps) {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
@@ -715,7 +717,9 @@ final class ChatSession {
 
     /// Поправка поля, которое распознавание прочитало неверно. nil — это не
     /// поправка: обычный вопрос идёт дальше
-    private func fieldFixReply(_ text: String, context: [Int64], steps: @escaping ChatStepSink) async -> ChatReply? {
+    /// `delegates` — есть облако или агент на iPhone: документ, которого нет в
+    /// разговоре, не угадывается, а решает агент — он видит переписку
+    private func fieldFixReply(_ text: String, context: [Int64], delegates: Bool = false, steps: @escaping ChatStepSink) async -> ChatReply? {
         var fix: ChatFieldFix
         var documentID: Int64?
         let parsed = ChatFieldFix(text)
@@ -737,10 +741,10 @@ final class ChatSession {
             return nil
         }
         pendingFix = nil
-        if documentID == nil { documentID = await fixTarget(fix, text: text, context: context) }
+        if documentID == nil { documentID = await fixTarget(fix, text: text, context: context, guessesRecent: !delegates) }
         guard let documentID, let document = await search.documents(ids: [documentID]).first else {
             // «Не паспорт, а справка» без документа в разговоре — не поправка
-            guard fix.key != nil else { return nil }
+            guard fix.key != nil, !delegates else { return nil }
             return ChatReply(text: "Какой документ поправить? Откройте его в чате — например, «паспорт Ольги», — и скажите, что исправить.",
                              cards: [], isConfident: true)
         }
@@ -772,7 +776,10 @@ final class ChatSession {
     /// Чей документ поправить: названный в просьбе («в паспорте Ольги»); из
     /// прошлого ответа — с этим полем; иначе удостоверение, добавленное за
     /// последние полчаса; иначе единственное
-    private func fixTarget(_ fix: ChatFieldFix, text: String, context: [Int64]) async -> Int64? {
+    /// `guessesRecent: false` — без догадки «добавлено за полчаса»: в живой
+    /// проверке 19.11.2026 поправка фамилии Ольги ушла в только что добавленный
+    /// СНИЛС Ильи. С облаком такой случай решает агент
+    private func fixTarget(_ fix: ChatFieldFix, text: String, context: [Int64], guessesRecent: Bool = true) async -> Int64? {
         // Слова нового значения — не имя: «правильно Трошкина»
         let valueWords = Set(SearchText.tokens(in: (fix.value ?? "") + " " + (fix.replacing ?? "")).map(\.word))
         let words = ChatIntent(text).nameWords.filter { $0.count >= 3 && !valueWords.contains($0) }
@@ -801,7 +808,7 @@ final class ChatSession {
         }
         let personal = await search.documents(ofTypes: DocumentType.allCases.filter(\.isPersonal))
         let dated = personal.compactMap { document in search.file(for: document).map { (document.id, $0.file.addedAt) } }
-        if let newest = dated.max(by: { $0.1 < $1.1 }), Date().timeIntervalSince(newest.1) < 30 * 60 { return newest.0 }
+        if guessesRecent, let newest = dated.max(by: { $0.1 < $1.1 }), Date().timeIntervalSince(newest.1) < 30 * 60 { return newest.0 }
         return personal.count == 1 ? personal[0].id : nil
     }
 
@@ -1044,6 +1051,24 @@ final class ChatSession {
         return GenUIStreamFeed.masked(rebuilt, with: { engine.mask($0) })
     }
 
+    /// Прогреть кэш облака, пока человек ещё не спросил: при открытии чата и
+    /// возвращении приложения на экран. Префикс — тот же, что у вопроса; без
+    /// облачного чата и ключа не уходит ничего (CloudChatEngine.prewarm)
+    func prewarmCloud() {
+        let cloud = search.cloud
+        guard !isPrewarming, cloud.chatModel != .local, let configuration = cloud.chatConfiguration else { return }
+        isPrewarming = true
+        Task {
+            defer { self.isPrewarming = false }
+            let engine = self.engine(for: configuration)
+            engine.documentIndex = await self.search.chatDocumentIndex(details: true)
+            engine.folderIndex = self.search.chatFolderIndex()
+            engine.genUI = CloudChatGenUI.isEnabled(for: configuration.provider)
+            engine.ownerName = self.search.owner.owner?.name
+            await engine.prewarm()
+        }
+    }
+
     /// Движок облака: один на сессию, с её перепиской
     private func engine(for configuration: CloudChatEngine.Configuration) -> CloudChatEngine {
         if let cloudEngine {
@@ -1068,7 +1093,8 @@ final class ChatSession {
         interface: InterfaceStream
     ) async throws -> CloudChatReply {
         let engine = engine(for: configuration)
-        engine.documentIndex = await search.chatDocumentIndex()
+        engine.documentIndex = await search.chatDocumentIndex(details: true)
+        engine.folderIndex = search.chatFolderIndex()
         engine.genUI = CloudChatGenUI.isEnabled(for: configuration.provider)
         engine.ownerName = search.owner.owner?.name
         interface.isGenUI = engine.genUI

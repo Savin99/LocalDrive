@@ -48,12 +48,17 @@ struct ChatFieldFix: Equatable {
 
     /// Слова, по которым понятно, что речь об ошибке, а не о вопросе
     static let markers = [
-        "исправь", "исправить", "исправьте", "поправь", "поправить", "поправьте", "измени", "изменить",
-        "поменяй", "поменять", "замени", "заменить", "ошибка", "ошибку", "ошибкой", "ошибся", "ошиблась",
-        "опечатка", "опечатку", "неправильно", "неправильная", "неправильный", "неправильное", "неверно",
-        "неверная", "неверный", "неверное", "должно быть", "должна быть", "должен быть", "правильно",
+        "исправь", "исправить", "исправьте", "поправь", "поправить", "поправьте", "ошибка", "ошибку", "ошибкой",
+        "ошибся", "ошиблась", "опечатка", "опечатку", "неправильно", "неправильная", "неправильный", "неправильное",
+        "неверно", "неверная", "неверный", "неверное", "должно быть", "должна быть", "должен быть", "правильно",
         "на самом деле",
     ]
+
+    /// «Замени», «поменяй», «измени» — поправка, только если названо поле:
+    /// «замени дату рождения на 12.05.1985». «Что нужно, чтобы заменить
+    /// паспорт в 45 лет?» — вопрос о замене документа, его решает облако
+    /// (большая проверка 19.11.2026: правила отвечали «Что исправить?»)
+    static let changeVerbs: Set<String> = ["измени", "изменить", "поменяй", "поменять", "замени", "заменить"]
 
     /// «Фамилия не так написана», «имя не то» — поправка, только если поле
     /// названо: «что-то не так» само по себе — не о поле
@@ -66,9 +71,11 @@ struct ChatFieldFix: Equatable {
     init?(_ text: String) {
         let lower = text.lowercased().replacingOccurrences(of: "ё", with: "е")
         let words = Set(SearchText.tokens(in: lower).map(\.word))
+        let namesAnyField = Self.namesField(words) || !ChatIntent(text).fieldKeys.isEmpty || ChatIntent(text).wantsAddress
         let marked = Self.markers.contains { marker in
             marker.contains(" ") ? lower.contains(marker) : words.contains(marker)
-        } || (Self.namesField(words) && Self.wrongWords.contains { lower.range(of: "(^|\\s)\($0)([\\s,.!?]|$)", options: .regularExpression) != nil })
+        } || (namesAnyField && !words.isDisjoint(with: Self.changeVerbs))
+            || (Self.namesField(words) && Self.wrongWords.contains { lower.range(of: "(^|\\s)\($0)([\\s,.!?]|$)", options: .regularExpression) != nil })
         // «Не Трошина, а Трошкина» — само по себе поправка
         let notBut = Self.capture(#"(?i)(?:^|\s)не\s+([^,]+?),?\s+а\s+(.+?)\s*$"#, in: text)
         guard marked || notBut != nil else { return nil }

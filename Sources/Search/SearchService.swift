@@ -334,20 +334,39 @@ final class SearchService {
     /// длиннее трёх закрываются. Только папки, доступные для поиска; не больше
     /// `limit` строк в порядке id — префикс запроса не меняется без причины,
     /// и кэш облака работает. С описью поиск своего документа — один раунд
-    func chatDocumentIndex(limit: Int = 200) async -> String {
+    /// `details` — опись для облака: ещё поля без номеров и сведения из
+    /// метаданных. Тогда на «дата рождения Ольги», «до какого числа аренда»,
+    /// «кто сдаёт квартиру» модель отвечает по описи одним запросом — без
+    /// поиска и открытия документа (замер 19.11.2026, docs/cloud-chat.md,
+    /// «Опись»). Опись — часть кэшируемого префикса: каждый запрос читает её
+    /// из кэша. Модели на iPhone — короткая: у неё мало контекста
+    func chatDocumentIndex(limit: Int = 200, details: Bool = false) async -> String {
         let folders = Dictionary(uniqueKeysWithValues: searchableFolders.map { ($0.id, $0) })
         let documents = await documents(ofTypes: DocumentType.allCases).sorted { $0.id < $1.id }.prefix(limit)
         let ids = documents.map(\.id)
         let fields = await fields(for: ids)
         let metadata = await metadata(for: ids)
+        // Тот же человек кириллицей: у загранпаспорта имя латиницей, и «TROSHINA
+        // OLGA» модель с Ольгой не связывала — насчитала три паспорта вместо четырёх
+        var cyrillicNames: [String: String] = [:]
+        for values in fields.values {
+            guard let name = values.first(where: { $0.key == FieldKey.fullName })?.value, Self.isCyrillic(name) else { continue }
+            cyrillicNames[ChatRouter.personKey(name)] = name
+        }
         return documents.compactMap { document -> String? in
             guard let folder = folders[document.folderID] else { return nil }
             let owner = fields[document.id]?.first { $0.key == FieldKey.fullName }?.value ?? ""
             let meta = metadata[document.id]
             let kind = [document.type.rawValue, meta?.kind.nilIfEmpty].compactMap { $0 }.joined(separator: "/")
+            // Полное имя — чтобы «Ольга» находилась по описи, а не поиском:
+            // по «Трошина О. П.» модель имени не знает
+            var person = details ? owner : ChatRouter.shortName(owner)
+            if details, !Self.isCyrillic(owner), let cyrillic = cyrillicNames[ChatRouter.personKey(owner)] {
+                person = "\(owner) — \(cyrillic)"
+            }
             var line = [
                 ChatCard.encodeID(document.id), kind, Self.withoutNumbers(meta?.title.nilIfEmpty ?? document.fileName),
-                owner.isEmpty ? "—" : ChatRouter.shortName(owner), Self.withoutNumbers(store.path(of: folder)),
+                owner.isEmpty ? "—" : person, Self.withoutNumbers(store.path(of: folder)),
             ].joined(separator: " · ")
             // Срок — только записанный в документе: «когда истекает» модель
             // отвечает текстом сразу. Срок паспорта РФ выводится из даты
@@ -357,8 +376,63 @@ final class SearchService {
                DocumentReadingMerge.date(until) != nil {
                 line += " · до \(until)"
             }
+            if details { line += Self.details(values, meta).map { " · " + $0 }.joined() }
             return line
         }.joined(separator: "\n")
+    }
+
+    /// Поля и сведения для подробной описи. Серии, номера, коды подразделения
+    /// и идентификаторы из метаданных — никогда: их модель видит только маской
+    /// через инструменты
+    private static func details(_ values: [DocumentField], _ meta: DocumentMetadata?) -> [String] {
+        func value(_ key: String) -> String? {
+            values.first { $0.key == key }?.value.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        }
+        var parts: [String] = []
+        if let birth = value(FieldKey.birthDate) { parts.append("д. р. \(birth)") }
+        if let place = value(FieldKey.birthPlace) { parts.append("место рождения: \(place)") }
+        let issued = [value(FieldKey.issueDate), value(FieldKey.issuedBy)].compactMap { $0 }
+        if !issued.isEmpty { parts.append("выдан " + issued.joined(separator: ", ")) }
+        if let address = value(FieldKey.registrationAddress) {
+            parts.append("прописка: \(address)" + (value(FieldKey.registrationDate).map { " с \($0)" } ?? ""))
+        }
+        if let meta {
+            if value(FieldKey.issueDate) == nil, let date = meta.documentDate.nilIfEmpty { parts.append("от \(date)") }
+            if let summary = meta.summary.nilIfEmpty { parts.append("кратко: " + withoutNumbers(String(summary.prefix(160)))) }
+            let people = meta.people.filter { !$0.name.isEmpty }.prefix(4).map { $0.role.isEmpty ? $0.name : "\($0.name) — \($0.role)" }
+            if !people.isEmpty { parts.append("люди: " + withoutNumbers(people.joined(separator: ", "))) }
+            if !meta.organizations.isEmpty { parts.append("организации: " + withoutNumbers(meta.organizations.prefix(3).joined(separator: ", "))) }
+            let amounts = meta.amounts.prefix(3).compactMap { amount -> String? in
+                guard let number = Double(amount.value.replacingOccurrences(of: ",", with: ".").filter { !$0.isWhitespace }) else { return nil }
+                return [amount.label, grouped(number), amount.currency].filter { !$0.isEmpty }.joined(separator: " ")
+            }
+            if !amounts.isEmpty { parts.append("суммы: " + amounts.joined(separator: ", ")) }
+            if !meta.tags.isEmpty { parts.append("теги: " + withoutNumbers(meta.tags.prefix(4).joined(separator: ", "))) }
+        }
+        // « · » — разделитель колонок описи
+        return parts.map { $0.replacingOccurrences(of: " · ", with: ", ").replacingOccurrences(of: "\n", with: " ") }
+    }
+
+    private static func isCyrillic(_ text: String) -> Bool {
+        text.unicodeScalars.contains { (0x0400...0x04FF).contains($0.value) }
+    }
+
+    /// Папки для облака: id, путь и сколько файлов. Перенос и «разложи» берут
+    /// id отсюда — без отдельного раунда list_folders. Скрытых папок нет
+    func chatFolderIndex(limit: Int = 60) -> String {
+        searchableFolders.prefix(limit).map { folder in
+            "\(folder.id.uuidString) · \(Self.withoutNumbers(path(of: folder))) · \(files(in: folder).count)"
+        }.joined(separator: "\n")
+    }
+
+    /// 65 000 — разряды пробелом: четыре цифры подряд опись закрыла бы как номер
+    private static func grouped(_ number: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.groupingSeparator = " "
+        formatter.decimalSeparator = ","
+        formatter.maximumFractionDigits = 2
+        return formatter.string(from: NSNumber(value: number)) ?? String(number)
     }
 
     private static func withoutNumbers(_ text: String) -> String {

@@ -280,7 +280,9 @@ struct GenUIAppCardComponent: GenUIComponent {
         ])),
     ]
 
-    let card: ChatCard
+    /// Карточки каталога. Обычно одна; модель просит и несколько разом —
+    /// «сроки» по списку document_ids: тогда по карточке на документ
+    let cards: [ChatCard]
 
     init?(_ props: GenUIProps, parser: inout GenUIParser) {
         guard let object = props["card"]?.object else {
@@ -288,24 +290,32 @@ struct GenUIAppCardComponent: GenUIComponent {
             return nil
         }
         let card = GenUIProps(object)
-        let documentID = GenUIDocumentID.parse(card["document_id"])
-        let ids = (card["document_ids"]?.array ?? []).compactMap { GenUIDocumentID.parse($0) }
+        // Документы — из document_id и document_ids, без повторов, по порядку
+        var ids: [Int64] = []
+        for id in [GenUIDocumentID.parse(card["document_id"])].compactMap({ $0 })
+            + (card["document_ids"]?.array ?? []).compactMap({ GenUIDocumentID.parse($0) }) where !ids.contains(id) {
+            ids.append(id)
+        }
+        guard let first = ids.first else {
+            parser.issue("нет документа", field: "card.document_id")
+            return nil
+        }
         switch card["kind"]?.string {
         case "fields":
-            guard let documentID, let keys = parser.strings(card, "keys", max: 12), !keys.isEmpty else { return nil }
-            self.card = .fields(documentID: documentID, keys: keys)
+            // keys: null — «все поля»: так модель просит «все данные паспорта».
+            // Живая проверка 19.11.2026: такие карточки отбрасывались, на
+            // экране было «Не нашёл, что ответить»
+            let keys = (card["keys"]?.isNull ?? true) ? [] : (parser.strings(card, "keys", max: 12) ?? [])
+            let wanted = keys.isEmpty ? FieldKey.order : keys
+            cards = ids.prefix(4).map { .fields(documentID: $0, keys: wanted) }
         case "document":
-            guard let documentID else { return nil }
-            self.card = .document(documentID: documentID)
+            cards = ids.count == 1 ? [.document(documentID: first)] : [.fileList(documentIDs: Array(ids.prefix(12)))]
         case "file_list":
-            guard !ids.isEmpty else { return nil }
-            self.card = .fileList(documentIDs: Array(ids.prefix(12)))
+            cards = [.fileList(documentIDs: Array(ids.prefix(12)))]
         case "snippet":
-            guard let documentID else { return nil }
-            self.card = .snippet(documentID: documentID, page: card["page"]?.number.map { Int($0) })
+            cards = [.snippet(documentID: first, page: card["page"]?.number.map { Int($0) })]
         case "expiry":
-            guard let documentID else { return nil }
-            self.card = .expiry(documentID: documentID)
+            cards = ids.prefix(6).map { .expiry(documentID: $0) }
         default:
             parser.issue("неизвестная карточка", field: "card.kind")
             return nil
@@ -314,7 +324,11 @@ struct GenUIAppCardComponent: GenUIComponent {
 
     func render(_ context: GenUIRenderContext, block: GenUIBlock) -> AnyView {
         if let appCard = context.environment.appCard {
-            return appCard(card)
+            return AnyView(
+                VStack(spacing: 10) {
+                    ForEach(Array(cards.enumerated()), id: \.offset) { _, card in appCard(card) }
+                }
+            )
         }
         return AnyView(
             Label("Карточка документа", systemImage: "doc.text")
