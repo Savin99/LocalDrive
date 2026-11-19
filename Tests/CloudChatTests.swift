@@ -335,14 +335,19 @@ final class CloudChatTests: XCTestCase {
         XCTAssertEqual(CloudJSON.parse(try XCTUnwrap(received))?["summary"]?.string, "Создам папку «Чеки»")
     }
 
-    func testSessionFallsBackToLocalWithNotice() async throws {
+    /// Чат только облачный (владелец 19.11.2026: «почему ответил сам, если всё
+    /// только облако»): правила ответ облака не подменяют — причина и «Повторить»
+    func testCloudFailureShowsCauseAndRetry() async throws {
         let (session, _) = cloudSession()
         StubURLProtocol.reset([OpenAI.error(403, "Country, region, or territory not supported", code: "unsupported_country_region_territory")])
         session.send("мой паспорт")
         try await finish(session)
         let answer = try XCTUnwrap(session.messages.last)
         XCTAssertEqual(answer.notice, "Облако недоступно — проверьте VPN", "причина, а не общее «недоступно»")
-        XCTAssertFalse(answer.text.isEmpty, "ответили правила")
+        XCTAssertTrue(answer.text.isEmpty, "правила не отвечают вместо облака")
+        guard case .clarify(_, let options)? = answer.cards.first?.card else { return XCTFail("нет «Повторить»: \(answer.cards)") }
+        XCTAssertEqual(options.map(\.title), ["Повторить"])
+        XCTAssertEqual(options.first?.query, "мой паспорт", "повтор — тот же вопрос")
         XCTAssertEqual(StubURLProtocol.requests.count, 1)
     }
 
@@ -632,15 +637,17 @@ final class CloudChatTests: XCTestCase {
         let instructions = try XCTUnwrap(self.instructions(try body(0)))
         XCTAssertTrue(instructions.contains("d\(id) — "), instructions)
 
-        // Облако не ответило — отвечают правила, с честной пометкой
+        // Облако не ответило — правила его не подменяют: причина и «Повторить»
+        // (чат только облачный, владелец 19.11.2026)
         StubURLProtocol.reset([OpenAI.error(500, "Internal error", code: "server_error")])
         session.send("паспорт ильи")
         try await finish(session)
-        let fallback = try XCTUnwrap(session.messages.last)
-        XCTAssertTrue(fallback.cards.contains { card in
+        let failed = try XCTUnwrap(session.messages.last)
+        XCTAssertFalse(failed.cards.contains { card in
             if case .fields(let document, _) = card.card { document == id } else { false }
-        }, "поля паспорта — от правил: \(fallback.text)")
-        XCTAssertNotNil(fallback.notice)
+        }, "полей от правил нет: \(failed.text)")
+        XCTAssertNotNil(failed.notice)
+        XCTAssertTrue(failed.cards.contains { if case .clarify = $0.card { true } else { false } }, "есть «Повторить»")
     }
 
     func testDeepThinkingAndOpenQuestionsGoToCloud() async throws {
@@ -695,25 +702,25 @@ final class CloudChatTests: XCTestCase {
     }
 
     func testNoticeNamesTheCause() {
-        XCTAssertEqual(ChatSession.notice(for: CloudChatTimeout(seconds: 20)), "Облако думало дольше 20 с — ответил сам")
+        XCTAssertEqual(ChatSession.notice(for: CloudChatTimeout(seconds: 90)), "Облако не ответило за 90 с")
         XCTAssertEqual(ChatSession.notice(for: CloudFailure.regionUnavailable), "Облако недоступно — проверьте VPN")
         XCTAssertEqual(ChatSession.notice(for: CloudFailure.network), "Облако недоступно — проверьте VPN")
         XCTAssertEqual(ChatSession.notice(for: CloudFailure.keyRejected), "Ключ не подошёл")
-        XCTAssertEqual(ChatSession.notice(for: CloudFailure.quotaExceeded), "На счёте облака кончились деньги — ответил сам")
-        XCTAssertEqual(ChatSession.notice(for: CloudFailure.badResponse), ChatSession.cloudNotice)
+        XCTAssertEqual(ChatSession.notice(for: CloudFailure.quotaExceeded), "На счёте облака кончились деньги")
+        XCTAssertEqual(ChatSession.notice(for: CloudFailure.badResponse), "Облако недоступно")
     }
 
-    func testSilentCloudFallsBackAfterFirstTokenDeadline() async throws {
+    /// Облако молчит дольше обычного — ответ не обрывается: в ленте строка
+    /// «отвечает дольше обычного», а ответ облака приходит и показывается
+    func testSilentCloudKeepsWaitingAndSaysSo() async throws {
         let (session, _) = cloudSession(silence: .milliseconds(300))
-        StubURLProtocol.reset([OpenAI.stalling([], then: [OpenAI.textDelta("поздно")], after: 3)])
-        let started = Date()
+        StubURLProtocol.reset([OpenAI.stalling([], then: [OpenAI.textDelta("поздно"), OpenAI.completed([OpenAI.message("поздно")])], after: 1.5)])
         session.send("мой паспорт")
         try await finish(session)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2.5, "ждали не дольше срока молчания")
         let answer = try XCTUnwrap(session.messages.last)
-        XCTAssertEqual(answer.notice, "Облако думало дольше 1 с — ответил сам")
-        XCTAssertFalse(answer.text.isEmpty, "ответили правила")
-        XCTAssertFalse(answer.text.contains("поздно"))
+        XCTAssertNil(answer.notice)
+        XCTAssertEqual(answer.text, "поздно", "ответ облака, а не правил")
+        XCTAssertTrue(answer.steps.contains { $0.text == "Облако отвечает дольше обычного — жду" }, "\(answer.steps.map(\.text))")
     }
 
     func testOverallDeadlineKeepsStreamedText() async throws {

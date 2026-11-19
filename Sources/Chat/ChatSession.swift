@@ -184,8 +184,8 @@ final class ChatSession {
     @ObservationIgnored private let cloudSession: URLSession
     /// Сколько ждать облако целиком, со всеми раундами инструментов
     @ObservationIgnored private let cloudTimeout: Duration
-    /// Сколько облако может молчать — ни рассуждения, ни текста. Дольше —
-    /// отвечают правила
+    /// Сколько облако молчит — ни рассуждения, ни текста, — пока в ленте не
+    /// появится «отвечает дольше обычного». Ответ при этом не обрывается
     @ObservationIgnored private let cloudSilence: Duration
     @ObservationIgnored private var cloudTask: Task<Void, Never>?
     @ObservationIgnored private var stopRequested = false
@@ -220,8 +220,8 @@ final class ChatSession {
         agentModel: @escaping @MainActor () -> (any LocalAgentModel)? = { nil },
         agentTimeout: Duration = .seconds(45),
         cloudSession: URLSession = .shared,
-        cloudTimeout: Duration = .seconds(60),
-        cloudSilence: Duration = .seconds(20),
+        cloudTimeout: Duration = .seconds(90),
+        cloudSilence: Duration = .seconds(8),
         inbox: ChatAttachmentInbox? = nil
     ) {
         self.search = search
@@ -373,7 +373,9 @@ final class ChatSession {
                 steps(.think, "Спрашиваю облако · \(configuration.model.chip)")
                 let result = await answerInCloud(trimmed, attachments: attachments, configuration: configuration, pending: pending.id)
                 if result.done { return }
-                notice = result.notice
+                // Только облако: правила облако не подменяют — причина и «Повторить»
+                self.showCloudFailure(result.notice ?? "Облако недоступно", question: trimmed, pending: pending.id)
+                return
             } else if wantsCloud {
                 notice = Self.cloudNotice
             }
@@ -590,17 +592,32 @@ final class ChatSession {
     }
 
     /// Пометка над ответом правилами — настоящая причина, а не «недоступно»
+    /// Причина, по которой облако не ответило. Чат — только облачный
+    /// (владелец 19.11.2026: «почему ответил сам, если всё только облако»):
+    /// правила ответ не подменяют, под причиной — «Повторить»
     static func notice(for error: Error) -> String {
         switch error {
-        case let timeout as CloudChatTimeout: "Облако думало дольше \(timeout.seconds) с — ответил сам"
+        case let timeout as CloudChatTimeout: "Облако не ответило за \(timeout.seconds) с"
         case CloudFailure.regionUnavailable, CloudFailure.network: "Облако недоступно — проверьте VPN"
         case CloudFailure.keyRejected: "Ключ не подошёл"
-        case CloudFailure.quotaExceeded: "На счёте облака кончились деньги — ответил сам"
-        case CloudFailure.overloaded: "Облако перегружено — ответил сам"
-        case CloudFailure.modelNotFound: "Модель облака не найдена — ответил сам"
-        case CloudFailure.rejected(let text): "Облако отклонило запрос: \(text) — ответил сам"
-        default: cloudNotice
+        case CloudFailure.quotaExceeded: "На счёте облака кончились деньги"
+        case CloudFailure.overloaded: "Облако перегружено — повторите через минуту"
+        case CloudFailure.modelNotFound: "Модель облака не найдена"
+        case CloudFailure.rejected(let text): "Облако отклонило запрос: \(text)"
+        default: "Облако недоступно"
         }
+    }
+
+    /// Облако не ответило: причина и кнопка «Повторить» — тот же вопрос заново
+    private func showCloudFailure(_ notice: String, question: String, pending: UUID) {
+        guard let index = messages.firstIndex(where: { $0.id == pending }) else { return }
+        let retry = [ClarifyOption(title: "Повторить", query: question)]
+        messages[index].text = ""
+        messages[index].notice = notice
+        messages[index].cards = [ResolvedCard(card: .clarify(question: nil, options: retry), content: .clarify(question: nil, options: retry))]
+        messages[index].thoughts = ""
+        messages[index].genui = nil
+        messages[index].isPending = false
     }
 
     /// Ответ, оборванный по сроку: текст уже шёл и остаётся
@@ -1082,8 +1099,8 @@ final class ChatSession {
     }
 
     /// Ответ облачной модели с потоком текста и рассуждения в пузырь ответа.
-    /// Сроки — молчание дольше `cloudSilence` или ответ дольше `cloudTimeout`;
-    /// «Подумать» думает дольше — сроки вдвое больше
+    /// Срок — ответ дольше `cloudTimeout`; молчание дольше `cloudSilence` —
+    /// только строка в ленте. «Подумать» думает дольше — сроки вдвое больше
     private func cloudAnswer(
         _ text: String,
         attachments: [CloudChatAttachment],
@@ -1093,8 +1110,12 @@ final class ChatSession {
         interface: InterfaceStream
     ) async throws -> CloudChatReply {
         let engine = engine(for: configuration)
+        let gathering = Date()
         engine.documentIndex = await search.chatDocumentIndex(details: true)
         engine.folderIndex = search.chatFolderIndex()
+        // База занята распознаванием — опись собирается долго: видно в ленте
+        let gathered = Date().timeIntervalSince(gathering)
+        if gathered >= CloudChatEngine.slowStage { stepSink(for: pending)(.think, "Собираю опись документов · \(Int(gathered.rounded())) с") }
         engine.genUI = CloudChatGenUI.isEnabled(for: configuration.provider)
         engine.ownerName = search.owner.owner?.name
         interface.isGenUI = engine.genUI
@@ -1130,12 +1151,18 @@ final class ChatSession {
                     }
                 }
             }
-            group.addTask { @MainActor in
+            group.addTask { @MainActor [weak self] in
                 let started = Date()
+                var warned = false
                 while true {
                     try await Task.sleep(for: .milliseconds(100))
                     let now = Date()
-                    if now.timeIntervalSince(activity.last) > silence { throw CloudChatTimeout(seconds: Int(silence.rounded(.up))) }
+                    // Облако молчит — ждём дальше и говорим об этом: ответ правил
+                    // вместо облачного владелец не хочет (сборка 22, «ответил сам»)
+                    if !warned, now.timeIntervalSince(activity.last) > silence {
+                        warned = true
+                        self?.stepSink(for: pending)(.think, "Облако отвечает дольше обычного — жду")
+                    }
                     if now.timeIntervalSince(started) > overall { throw CloudChatTimeout(seconds: Int(overall.rounded(.up))) }
                 }
             }

@@ -186,6 +186,9 @@ final class CloudChatEngine {
     /// лишний раунд за финальным текстом не нужен
     static let terminalTools: Set<String> = ["show_cards", "propose_file_actions", "show_fact_card", "propose_fact_card", "propose_field_fix"]
 
+    /// Этап дольше этого — строкой в ленте шагов: где ушло время
+    static let slowStage: TimeInterval = 3
+
     static let emptyAnswerNudge = "Ответ получился пустым. Сделай то, о чём я просил: вызови нужный инструмент или ответь текстом."
 
     static func isCyrillic(_ character: Character) -> Bool {
@@ -411,7 +414,7 @@ final class CloudChatEngine {
                                        configuration: self.configuration, level: level, state: state, options: options,
                                        genUI: genUI && self.options.genUI)
             }
-            let turn = try await stream(request, dialect: dialect) { delta in
+            let turn = try await stream(request, dialect: dialect, onStage: { onEvent(.step(.think, $0)) }) { delta in
                 if firstToken == nil { firstToken = Date().timeIntervalSince(started) }
                 if delta.thought {
                     round.thoughts += delta.text
@@ -520,13 +523,19 @@ final class CloudChatEngine {
     private func stream(
         _ request: () -> URLRequest,
         dialect: any CloudChatDialect,
+        onStage: (String) -> Void = { _ in },
         onDelta: (CloudChatDelta) -> Void,
         onCall: (CloudChatCall) async -> Void
     ) async throws -> CloudChatTurn {
         while true {
             let (bytes, response): (URLSession.AsyncBytes, URLResponse)
+            let sent = Date()
             do {
                 (bytes, response) = try await session.bytes(for: request())
+                // Долго до ответа сервера — это сеть или VPN, а не модель: видно
+                // в ленте шагов (сборка 22 на iPhone владельца молчала 20 с)
+                let waited = Date().timeIntervalSince(sent)
+                if waited >= Self.slowStage { onStage("Соединение с облаком · \(Int(waited.rounded())) с") }
             } catch is CancellationError {
                 throw CancellationError()
             } catch let error as URLError where error.code == .cancelled {
@@ -545,7 +554,17 @@ final class CloudChatEngine {
                 throw CloudResponseParser.failure(status: status, data: body) ?? CloudFailure.badResponse
             }
             do {
-                let turn = try await dialect.read(bytes.lines, onDelta: onDelta, onCall: onCall)
+                // Сервер ответил, а модель долго не начинает — это уже облако
+                let answered = Date()
+                var started = false
+                let turn = try await dialect.read(bytes.lines, onDelta: { delta in
+                    if !started {
+                        started = true
+                        let waited = Date().timeIntervalSince(answered)
+                        if waited >= Self.slowStage { onStage("Облако начало отвечать через \(Int(waited.rounded())) с") }
+                    }
+                    onDelta(delta)
+                }, onCall: onCall)
                 usage += turn.usage
                 guard !turn.items.isEmpty else { throw CloudFailure.badResponse }
                 return turn
