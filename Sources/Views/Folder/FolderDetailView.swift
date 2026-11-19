@@ -195,6 +195,14 @@ struct FolderDetailView: View {
         }
         .modifier(ClipboardWatcher(kind: $clipboard))
         .task(id: folder.id) { await backfillContentDates() }
+        #if DEBUG
+        // Скриншоты: «-SelectAll» — папка сразу в режиме выбора, всё отмечено
+        .task {
+            guard ProcessInfo.processInfo.arguments.contains("-SelectAll") else { return }
+            try? await Task.sleep(for: .seconds(1))
+            selection = Set(files.map(\.name))
+        }
+        #endif
         .navigationTitle(navigationTitle)
         .navigationBarTitleDisplayMode(showsBreadcrumbs ? .inline : .large)
         // В режиме выбора слева — «Выбрать все», как в «Файлах»
@@ -337,14 +345,16 @@ struct FolderDetailView: View {
                     .fontWeight(.semibold)
                     .accessibilityIdentifier("fileSelect")
             }
-            ToolbarItem(placement: .bottomBar) { shareSelected }
+            // Панель выбранного в духе референса владельца: сколько выбрано,
+            // удалить — красным стеклом, поделиться — главной кнопкой
+            ToolbarItem(placement: .bottomBar) { selectionCount }
             ToolbarSpacer(.flexible, placement: .bottomBar)
+            ToolbarItem(placement: .bottomBar) { deleteSelected }
             ToolbarItemGroup(placement: .bottomBar) {
                 moveSelected
                 copySelected
             }
-            ToolbarSpacer(.flexible, placement: .bottomBar)
-            ToolbarItem(placement: .bottomBar) { deleteSelected }
+            ToolbarItem(placement: .bottomBar) { shareSelected }
         } else if isReordering {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -434,10 +444,24 @@ struct FolderDetailView: View {
 
     // Действия с выбранным: иконки внизу, подписи — для VoiceOver
 
+    /// «📄 4» — сколько выбрано
+    private var selectionCount: some View {
+        Label("\(selectedFiles.count)", systemImage: "doc.fill")
+            .labelStyle(.titleAndIcon)
+            .font(.headline.monospacedDigit())
+            .foregroundStyle(Theme.ink)
+            .contentTransition(.numericText())
+            .animation(.snappy(duration: 0.2), value: selectedFiles.count)
+            .accessibilityLabel("Выбрано: \(selectedFiles.count)")
+    }
+
     private var shareSelected: some View {
         ShareLink(items: selectedFiles.map(\.url)) {
             Label("Поделиться", systemImage: "square.and.arrow.up")
+                .labelStyle(.titleAndIcon)
         }
+        .buttonStyle(.glassProminent)
+        .tint(Theme.ink)
         .disabled(selectedFiles.isEmpty)
         .accessibilityIdentifier("bulkShare")
     }
@@ -478,6 +502,7 @@ struct FolderDetailView: View {
         } label: {
             Label("Удалить", systemImage: "trash")
         }
+        .buttonStyle(.glassProminent)
         .tint(.red)
         .disabled(selectedFiles.isEmpty)
         .accessibilityIdentifier("bulkDelete")
@@ -686,18 +711,9 @@ struct FolderDetailView: View {
             Button {
                 toggle(file)
             } label: {
-                cell
-                    // Слева сверху: справа у видео уже стоит значок воспроизведения
-                    .overlay(alignment: .topLeading) {
-                        FileSelectionMark(isSelected: isSelected, accent: accent)
-                            .padding(10)
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(accent, lineWidth: isSelected ? 2.5 : 0)
-                    }
-                    .scaleEffect(isSelected ? 0.97 : 1)
-                    .animation(.snappy(duration: 0.18), value: isSelected)
+                // Отметка — на самом листе: подкраска и галочка (владелец
+                // 19.11.2026: «что это за синяя рамка» вокруг листа с подписью)
+                FileGridCell(file: file, accent: accent, side: side, showsContentDate: sortOrder.showsContentDate, selection: isSelected)
             }
             .buttonStyle(.plain)
             .accessibilityAddTraits(isSelected ? .isSelected : [])
