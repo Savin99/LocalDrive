@@ -16,6 +16,11 @@ struct HomeView: View {
     /// Открытые папки. По глубине MainView прячет переключатель страниц
     @State private var path: [UUID] = []
     @Namespace private var zoomNamespace
+    /// Папка, над которой держат файл из другого приложения
+    @State private var dropTarget: UUID?
+    /// Что лежит в буфере: фото, PDF, файл — строка «Вставить во «Входящие»»
+    @State private var clipboard: ClipboardKind?
+    @State private var toastSymbol = "eye.slash.fill"
 
     /// Найденный файл и вся выдача: листать в просмотре можно по ней
     private struct OpenedResult: Identifiable {
@@ -48,7 +53,7 @@ struct HomeView: View {
         GeometryReader { proxy in
             NavigationStack(path: $path) {
                 ZStack {
-                    Theme.background.ignoresSafeArea()
+                    AppBackdrop()
 
                     if isSearching {
                         SearchResultsView(query: query) { result, all in
@@ -75,6 +80,22 @@ struct HomeView: View {
                     }
                 }
                 .contentShape(Rectangle())
+                // Файл бросили мимо папок — во «Входящие»: разложить поможет чат
+                .onDrop(of: [.item], isTargeted: nil) { providers in
+                    importDropped(providers, to: nil)
+                }
+                .safeAreaInset(edge: .bottom) {
+                    if let clipboard, !isSearching {
+                        ClipboardPasteBar(kind: clipboard, destination: "во «\(Self.inboxName)»") { providers in
+                            importDropped(providers, to: nil)
+                            withAnimation(.snappy(duration: 0.2)) { self.clipboard = nil }
+                        } onHandled: {
+                            withAnimation(.snappy(duration: 0.2)) { self.clipboard = nil }
+                        }
+                        .padding(.bottom, 8)
+                    }
+                }
+                .modifier(ClipboardWatcher(kind: $clipboard))
                 .navigationTitle("Мои файлы")
                 .navigationBarTitleDisplayMode(.inline)
                 // Посередине шапки стоит общий переключатель «Чат | Файлы»
@@ -168,6 +189,16 @@ struct HomeView: View {
             .environment(\.folderZoomNamespace, zoomNamespace)
         }
         .preference(key: FilesNavigationDepthKey.self, value: path.count)
+        #if DEBUG
+        // Скриншоты: «-OpenFolder Паспорта» — сразу внутри папки
+        .task {
+            guard let name = DemoVault.argument("-OpenFolder") else { return }
+            for _ in 0..<50 where store.folders.first(where: { $0.name == name }) == nil {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            if let folder = store.folders.first(where: { $0.name == name }) { path = [folder.id] }
+        }
+        #endif
         .sensoryFeedback(.success, trigger: areHiddenFoldersRevealed)
         // Скрытые папки открыли знаком или паролем в настройках — на экране корень с ними
         .onChange(of: hiddenFolders.revealCount) { _, _ in
@@ -208,7 +239,8 @@ struct HomeView: View {
                                 FolderCard(
                                     folder: folder,
                                     stats: store.stats(for: folder, includingHidden: areHiddenFoldersRevealed),
-                                    preview: store.previewFiles(in: folder)
+                                    preview: store.previewFiles(in: folder),
+                                    isDropTarget: dropTarget == folder.id
                                 )
                                 .overlay(alignment: .topTrailing) {
                                     if folder.isSuperHidden {
@@ -217,6 +249,17 @@ struct HomeView: View {
                                 }
                             }
                             .buttonStyle(.plain)
+                            // Файл из «Фото», «Файлов» или Safari — прямо на папку;
+                            // подержать над ней — откроется (spring loading)
+                            .onDrop(of: [.item], isTargeted: Binding(
+                                get: { dropTarget == folder.id },
+                                set: { targeted in
+                                    if targeted { dropTarget = folder.id } else if dropTarget == folder.id { dropTarget = nil }
+                                }
+                            )) { providers in
+                                importDropped(providers, to: folder)
+                            }
+                            .springLoadingBehavior(.enabled)
                             .matchedTransitionSource(id: folder.id, in: zoomNamespace)
                             .transition(.scale(scale: 0.92).combined(with: .opacity))
                             .appearSpring(delay: Double(index) * 0.04)
@@ -259,7 +302,7 @@ struct HomeView: View {
     }
 
     private func toastBanner(_ text: String) -> some View {
-        Label(text, systemImage: "eye.slash.fill")
+        Label(text, systemImage: toastSymbol)
             .font(.system(.subheadline, weight: .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 16)
@@ -288,6 +331,29 @@ struct HomeView: View {
         }
     }
 
+    static let inboxName = "Входящие"
+
+    /// Брошенное или вставленное — в папку, а мимо папок — во «Входящие»
+    /// (создаются при первой вставке). Загрузка начинается сразу: после
+    /// обработчика содержимое перетаскивания и буфера недоступно
+    @discardableResult
+    private func importDropped(_ providers: [NSItemProvider], to folder: VaultFolder?) -> Bool {
+        let usable = providers.filter { VaultStore.isExternal($0) && VaultStore.importType(for: $0) != nil }
+        guard !usable.isEmpty, let target = folder ?? inboxFolder() else { return false }
+        let loading = store.importItems(usable, to: target)
+        Task { @MainActor in
+            let result = await loading.value
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            showToast("\(pluralize(result.imported.count, "файл", "файла", "файлов")) — в «\(target.name)»", symbol: "tray.and.arrow.down.fill")
+        }
+        return true
+    }
+
+    private func inboxFolder() -> VaultFolder? {
+        store.rootFolders.first { $0.name == Self.inboxName && !$0.isSuperHidden }
+            ?? store.createFolder(name: Self.inboxName, icon: "tray.fill", color: "purple")
+    }
+
     /// Папка ушла внутрь другой и с главного экрана пропадает — это и есть
     /// ответ. Тост главного экрана занят скрытыми папками, поэтому только отклик
     private func moveFolder(_ folder: VaultFolder, to parentID: UUID?) {
@@ -295,7 +361,8 @@ struct HomeView: View {
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
-    private func showToast(_ text: String) {
+    private func showToast(_ text: String, symbol: String = "eye.slash.fill") {
+        toastSymbol = symbol
         withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
             toast = text
         }

@@ -59,11 +59,31 @@ struct SettingsView: View {
                         : "Знак рисуют одним движением в любом месте «Файлов». Пароль появится вместе со своим знаком.")
                 }
 
-                Section(DocumentReaderFeature.isEnabled ? "Модели на iPhone" : "Чат") {
+                // Чат и разбор документов — облако (решение владельца 19.11.2026):
+                // ключ — один раз, дальше всё включено само
+                Section {
+                    NavigationLink {
+                        CloudRecognitionSettingsView()
+                    } label: {
+                        LabeledContent {
+                            Text(search.cloud.hasKey ? search.cloud.provider.title : "Нет ключа")
+                        } label: {
+                            Label("Облако", systemImage: "sparkles")
+                        }
+                    }
+                    .accessibilityIdentifier("settingsCloud")
+                } header: {
+                    Text("Чат и документы")
+                } footer: {
+                    Text(search.cloud.hasKey
+                        ? "Чат отвечает и разбирает документы через облако по вашему ключу."
+                        : "Вставьте ключ — чат и распознавание документов включатся сами.")
+                }
+                Section {
                     NavigationLink {
                         ChatModelSettingsView()
                     } label: {
-                        Label("Модель для чата", systemImage: "cpu")
+                        Label("Модель для чата на iPhone", systemImage: "cpu")
                     }
                     if DocumentReaderFeature.isEnabled {
                         NavigationLink {
@@ -73,12 +93,10 @@ struct SettingsView: View {
                         }
                         .accessibilityIdentifier("settingsDocumentModel")
                     }
-                    NavigationLink {
-                        CloudRecognitionSettingsView()
-                    } label: {
-                        Label("Облачное распознавание", systemImage: "cloud")
-                    }
-                    .accessibilityIdentifier("settingsCloud")
+                } header: {
+                    Text("Запасной режим без сети")
+                } footer: {
+                    Text("Нужны, только если облако недоступно. Без них чат отвечает правилами на iPhone.")
                 }
 
                 Section {

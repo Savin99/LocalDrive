@@ -52,6 +52,8 @@ struct FolderDetailView: View {
     @State private var toast: String?
     /// Над папкой держат файл из другого приложения
     @State private var isDropTargeted = false
+    /// Что лежит в буфере: фото, PDF, файл — строка «Вставить в «папку»» внизу
+    @State private var clipboard: ClipboardKind?
     @State private var isCreatingFolder = false
     @State private var editingFolder: VaultFolder?
     @State private var movingFolder: VaultFolder?
@@ -115,11 +117,10 @@ struct FolderDetailView: View {
 
     var body: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
-
-            // Экран подхватывает цвет папки: мягкий градиент из-под заголовка
+            // Точечный фон и свечение цветом папки — экран подхватывает её цвет
+            AppBackdrop(glow: accent)
             LinearGradient(
-                colors: [accent.opacity(0.22), accent.opacity(0.04), .clear],
+                colors: [accent.opacity(0.16), accent.opacity(0.03), .clear],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -180,6 +181,19 @@ struct FolderDetailView: View {
             }
         }
         .onDrop(of: dropTypes, isTargeted: $isDropTargeted, perform: acceptDrop)
+        // В буфере фото или документ — «Вставить в «папку»» одним касанием
+        .safeAreaInset(edge: .bottom) {
+            if let clipboard, !isSelecting, !isReordering {
+                ClipboardPasteBar(kind: clipboard, destination: "в «\(folder.name)»") { providers in
+                    importItems(providers)
+                    withAnimation(.snappy(duration: 0.2)) { self.clipboard = nil }
+                } onHandled: {
+                    withAnimation(.snappy(duration: 0.2)) { self.clipboard = nil }
+                }
+                .padding(.bottom, 8)
+            }
+        }
+        .modifier(ClipboardWatcher(kind: $clipboard))
         .task(id: folder.id) { await backfillContentDates() }
         .navigationTitle(navigationTitle)
         .navigationBarTitleDisplayMode(showsBreadcrumbs ? .inline : .large)

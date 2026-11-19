@@ -7,12 +7,40 @@ import UniformTypeIdentifiers
 // показывает плашку «разрешить вставку». Сама вставка — системная PasteButton:
 // она читает буфер без запроса. Текст сюда не относится: вставить вопрос можно
 // и в поле ввода; номер, скопированный из карточки, тоже текст
+// Та же строка — в папке и на главном («вставить в «Паспорта»», «во
+// «Входящие»»): владелец 19.11.2026 — «если в буфере, предложить вставить —
+// везде, и в папках, и в чате»
 struct ClipboardPasteBar: View {
     let kind: ClipboardKind
-    let inbox: ChatAttachmentInbox
+    /// Куда ляжет вставка: «в «Паспорта»». nil — в чат, подпись не нужна
+    var destination: String?
+    /// Вставка. Загрузка начинается прямо в обработчике PasteButton: после
+    /// него содержимое буфера уже недоступно
+    let paste: ([NSItemProvider]) -> Void
     /// Вставили или отказались — строка уходит до следующего содержимого буфера
     var onHandled: () -> Void
-    var onAdded: ([ChatAttachment]) -> Void = { _ in }
+
+    /// В чат — вложением в ящик над полем ввода
+    init(kind: ClipboardKind, inbox: ChatAttachmentInbox, onHandled: @escaping () -> Void,
+         onAdded: @escaping ([ChatAttachment]) -> Void = { _ in }) {
+        self.kind = kind
+        self.onHandled = onHandled
+        paste = { providers in
+            let loading = inbox.beginAdding(providers: providers)
+            Task { @MainActor in
+                onHandled()
+                onAdded(await loading.value)
+            }
+        }
+    }
+
+    /// В папку: `paste` сам начинает загрузку и закрывает строку
+    init(kind: ClipboardKind, destination: String, paste: @escaping ([NSItemProvider]) -> Void, onHandled: @escaping () -> Void) {
+        self.kind = kind
+        self.destination = destination
+        self.paste = paste
+        self.onHandled = onHandled
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -20,25 +48,26 @@ struct ClipboardPasteBar: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.ink)
                 .frame(width: 30, height: 30)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            Text("В буфере \(kind.title)")
-                .font(.subheadline)
-                .foregroundStyle(Theme.ink)
-                .lineLimit(1)
+                .background(Theme.well, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 0) {
+                Text("В буфере \(kind.title)")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.ink)
+                if let destination {
+                    Text("Вставить \(destination)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .lineLimit(1)
             Spacer(minLength: 4)
             PasteButton(supportedContentTypes: FileClipboard.pasteTypes) { providers in
-                // Загрузка начинается прямо в обработчике: после него
-                // содержимое буфера уже недоступно
-                let loading = inbox.beginAdding(providers: providers)
-                Task { @MainActor in
-                    onHandled()
-                    onAdded(await loading.value)
-                }
+                paste(providers)
             }
             .labelStyle(.titleOnly)
             .buttonBorderShape(.capsule)
             .tint(Theme.ink)
-            .accessibilityIdentifier("chatClipboardPaste")
+            .accessibilityIdentifier(destination == nil ? "chatClipboardPaste" : "folderClipboardPaste")
             Button(action: onHandled) {
                 Image(systemName: "xmark")
                     .font(.caption.weight(.bold))
@@ -51,14 +80,12 @@ struct ClipboardPasteBar: View {
         .padding(.leading, 8)
         .padding(.trailing, 4)
         .padding(.vertical, 6)
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.border, lineWidth: 1)
-        }
+        // Плавающая строка — системное стекло, как поле ввода
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .padding(.horizontal, 12)
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("chatClipboardBar")
+        .accessibilityIdentifier(destination == nil ? "chatClipboardBar" : "folderClipboardBar")
     }
 }
 
@@ -77,6 +104,9 @@ struct ClipboardWatcher: ViewModifier {
             .onAppear(perform: refresh)
             .onChange(of: scenePhase) { _, phase in if phase == .active { refresh() } }
             .onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in refresh() }
+            // Вставили или отказались на другой странице (чат, «Файлы», папка):
+            // эта строка тоже уходит — страницы живут одновременно
+            .onChange(of: handledChange) { _, _ in refresh() }
             .onChange(of: kind) { old, new in
                 // Строку закрыли — это содержимое больше не предлагать
                 if old != nil, new == nil { handledChange = UIPasteboard.general.changeCount }

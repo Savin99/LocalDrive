@@ -1,6 +1,8 @@
 import SwiftUI
 
-// Карточка сетки: крупное превью содержимого файла
+// Карточка сетки — сам лист документа: превью со скруглением и загнутым
+// уголком, под ним имя и размер, без подложки (референсы владельца 19.11.2026).
+// Фото и видео — без уголка: это не бумага
 struct FileGridCell: View {
     let file: VaultFile
     let accent: Color
@@ -11,14 +13,19 @@ struct FileGridCell: View {
         file.type.conforms(to: .movie) || file.type.conforms(to: .video)
     }
 
+    private var curl: CGFloat { isVideo ? 0 : max(18, side * 0.17) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 8) {
             FileThumbnail(
                 file: file,
                 accent: accent,
-                size: CGSize(width: side, height: side),
-                cornerRadius: 0
+                size: CGSize(width: side, height: side * 1.18),
+                cornerRadius: 0,
+                showsBorder: false
             )
+            // Лист со срезанным уголком, подгиб — поверх
+            .clipShape(CutCornerRectangle(radius: 14, cut: curl))
             .overlay(alignment: .topTrailing) {
                 if isVideo {
                     Image(systemName: "play.circle.fill")
@@ -26,6 +33,8 @@ struct FileGridCell: View {
                         .foregroundStyle(.white)
                         .shadow(color: .black.opacity(0.4), radius: 4)
                         .padding(8)
+                } else {
+                    PageCurl(size: curl)
                 }
             }
             .overlay(alignment: .bottomLeading) {
@@ -34,11 +43,14 @@ struct FileGridCell: View {
                         .padding(8)
                 }
             }
+            .overlay(CutCornerRectangle(radius: 14, cut: curl).stroke(Theme.hairline, lineWidth: 1))
+            .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
 
             VStack(alignment: .leading, spacing: 2) {
                 // Без расширения и в две строки — иначе имя рвётся посередине
                 Text(file.displayName)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
                     .lineLimit(2, reservesSpace: true)
                     .multilineTextAlignment(.leading)
                 Text(RussianFormat.size(file.size))
@@ -46,13 +58,58 @@ struct FileGridCell: View {
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 13)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 2)
         }
-        .background(Theme.card)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .cardBorder(cornerRadius: 18)
         .contentShape(Rectangle())
+    }
+}
+
+/// Загнутый уголок листа: светлый треугольник подгиба с тенью
+struct PageCurl: View {
+    let size: CGFloat
+
+    var body: some View {
+        FoldTriangle()
+            .fill(LinearGradient(colors: [Color(white: 0.98), Color(white: 0.8)], startPoint: .topTrailing, endPoint: .bottomLeading))
+            .shadow(color: .black.opacity(0.3), radius: 2, x: -1, y: 1)
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+}
+
+/// Подгиб: прямой угол внизу слева, гипотенуза — по линии среза
+private struct FoldTriangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX + 3, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - 3), control: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// Скруглённый прямоугольник со срезанным правым верхним углом — лист,
+/// у которого загнули уголок. `cut == 0` — обычное скругление
+struct CutCornerRectangle: Shape {
+    let radius: CGFloat
+    let cut: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        guard cut > 0 else { return RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: rect) }
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + radius, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - cut, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + cut))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX - radius, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - radius), control: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
+        path.addQuadCurve(to: CGPoint(x: rect.minX + radius, y: rect.minY), control: CGPoint(x: rect.minX, y: rect.minY))
+        path.closeSubpath()
+        return path
     }
 }
 

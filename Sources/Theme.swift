@@ -20,21 +20,25 @@ extension UIColor {
     }
 }
 
-// Дизайн-система в духе приложения ChatGPT (выбор владельца от 12.10.2026):
-// белый и почти чёрный, серые поверхности и тонкие рамки, зелёный акцент —
-// скупо, на главных действиях. Цвета папок остаются: это их опознавательный знак
+// Дизайн-система «Стекло» (референсы владельца 19.11.2026, docs/design.md):
+// почти чёрный фон с точечной сеткой, стекло на элементах управления,
+// монохромный текст и кнопки; цвет — у папок и их свечения, фиолетовый
+// акцент — скупо: переключатели и выбранное. Прежняя — в духе ChatGPT (12.10.2026)
 enum Theme {
-    static let background = Color(light: 0xFFFFFF, dark: 0x212121)
-    static let card = Color(light: 0xFFFFFF, dark: 0x2A2A2A)
-    /// Зелёный OpenAI — переключатели, выбранное, главное действие меню
-    static let accent = Color(light: 0x10A37F, dark: 0x19C37D)
+    static let background = Color(light: 0xF2F2F5, dark: 0x0A0A0C)
+    static let card = Color(light: 0xFFFFFF, dark: 0x151517)
+    /// Фиолетовый — переключатели, выбранное, главное действие меню
+    static let accent = Color(light: 0x5B4FE0, dark: 0x8F85FF)
 
     /// Текст и главные кнопки: почти чёрный днём, почти белый вечером
-    static let ink = Color(light: 0x0D0D0D, dark: 0xECECEC)
-    /// Серая поверхность: пузырь вопроса, поле ввода, чипы
-    static let surface = Color(light: 0xF4F4F4, dark: 0x303030)
+    static let ink = Color(light: 0x0B0B0D, dark: 0xF4F4F6)
+    /// Серая поверхность: чипы, подложки значков
+    static let surface = Color(light: 0xE8E8ED, dark: 0x1E1E22)
+    /// Пузырь вопроса: днём чёрный с белым текстом, вечером — графит
+    static let bubble = Color(light: 0x111113, dark: 0x232327)
+    static let bubbleInk = Color(light: 0xFFFFFF, dark: 0xF4F4F6)
     /// Рамка карточек и полей
-    static let border = Color(light: 0xE5E5E5, dark: 0x3A3A3A)
+    static let border = Color(light: 0xE0E0E6, dark: 0x2A2A30)
     /// Фон бокового меню
     static let sidebar = Color(light: 0xF9F9F9, dark: 0x171717)
 

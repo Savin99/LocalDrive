@@ -1,129 +1,122 @@
 import SwiftUI
 
+// Папка на главном — стеклянная, как в референсах владельца 19.11.2026: задняя
+// стенка с корешком цветом папки, из кармана выглядывают последние файлы,
+// карман — матовое стекло, на нём наклейка-значок. Стекло кармана — обычный
+// материал, а не Liquid Glass: системное стекло — для слоя управления, не
+// содержимого (Apple HIG, Materials; docs/design.md)
 struct FolderCard: View {
     let folder: VaultFolder
     let stats: FolderStats
-    /// До четырёх последних файлов — из них собирается коллаж
+    /// До четырёх последних файлов — сверху выглядывают первые три
     let preview: [VaultFile]
+    /// Над папкой держат файл — она подсвечивается и ждёт
+    var isDropTarget = false
+
+    @Environment(\.colorScheme) private var scheme
 
     private var accent: Color { Theme.color(folder.color) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ZStack {
-                if preview.isEmpty {
-                    emptyCover
-                } else {
-                    FolderCollage(files: preview, accent: accent)
-                }
+        VStack(spacing: 10) {
+            art
+                .frame(height: 142)
+            HStack(spacing: 6) {
+                Text(folder.name)
+                    .font(.system(.subheadline, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                CountPill(count: stats.count + stats.subfolders)
             }
-            .frame(height: 116)
             .frame(maxWidth: .infinity)
-            .clipped()
-
-            HStack(spacing: 8) {
-                Image(systemName: folder.icon)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(accent)
-                    .frame(width: 26, height: 26)
-                    .background(accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(folder.name)
-                        .font(.system(.subheadline, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text(subtitle)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 13)
-            .padding(.vertical, 11)
+            .accessibilityElement(children: .combine)
         }
-        .background(Theme.card)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .cardBorder(cornerRadius: 20)
+        .scaleEffect(isDropTarget ? 1.05 : 1)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isDropTarget)
+        .accessibilityLabel("\(folder.name), \(subtitle)")
     }
 
-    private var emptyCover: some View {
-        ZStack {
-            LinearGradient(
-                colors: [accent.opacity(0.20), accent.opacity(0.07)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Image(systemName: folder.icon)
-                .font(.system(size: 30, weight: .medium))
-                .foregroundStyle(accent.opacity(0.55))
+    private var art: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let height = proxy.size.height
+            let pocket = height * 0.6
+            ZStack(alignment: .bottom) {
+                // Свечение цветом папки — сильнее, когда над ней держат файл
+                Ellipse()
+                    .fill(accent.opacity(isDropTarget ? 0.6 : (scheme == .dark ? 0.32 : 0.24)))
+                    .frame(width: width * 0.86, height: pocket * 0.8)
+                    .blur(radius: 24)
+                    .offset(y: 6)
+                // Задняя стенка с корешком
+                FolderShape(radius: 20)
+                    .fill(LinearGradient(colors: [back(0.25), back(0.45)], startPoint: .top, endPoint: .bottom))
+                    .overlay(FolderShape(radius: 20).stroke(.white.opacity(0.14), lineWidth: 0.8))
+                    .frame(width: width, height: height * 0.86)
+                papers(width: width, height: height, pocket: pocket)
+                // Карман — матовое стекло со светлой кромкой
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(LinearGradient(colors: [accent.opacity(0.24), accent.opacity(0.06)], startPoint: .top, endPoint: .bottom))
+                    )
+                    // Вечером карман глубже: снизу темнее, стекло не «молочное»
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(LinearGradient(colors: [.clear, .black.opacity(scheme == .dark ? 0.32 : 0.04)], startPoint: .top, endPoint: .bottom))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(LinearGradient(colors: [.white.opacity(0.5), .white.opacity(0.05)], startPoint: .top, endPoint: .bottom),
+                                          lineWidth: isDropTarget ? 2 : 1)
+                    )
+                    .frame(width: width, height: pocket)
+                    .shadow(color: .black.opacity(scheme == .dark ? 0.35 : 0.12), radius: 10, y: 6)
+                StickerIcon(symbol: folder.icon, color: accent, size: 34)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            }
         }
+    }
+
+    /// Бумаги в кармане: последние файлы веером; у пустой папки — один чистый лист
+    private func papers(width: CGFloat, height: CGFloat, pocket: CGFloat) -> some View {
+        let size = CGSize(width: width * 0.46, height: height * 0.66)
+        let shown = Array(preview.prefix(3))
+        let angles: [Double] = shown.count == 1 ? [-3] : (shown.count == 2 ? [-7, 5] : [-9, 1, 9])
+        let shifts: [CGFloat] = shown.count == 1 ? [0] : (shown.count == 2 ? [-0.16, 0.16] : [-0.24, 0, 0.24])
+        return ZStack {
+            if shown.isEmpty {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.white.opacity(scheme == .dark ? 0.85 : 0.95))
+                    .frame(width: size.width, height: size.height)
+                    .rotationEffect(.degrees(-4))
+            }
+            ForEach(Array(shown.enumerated()), id: \.element.id) { index, file in
+                FileThumbnail(file: file, accent: accent, size: size, cornerRadius: 8, showsBorder: false)
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.white.opacity(0.9), lineWidth: 1.5))
+                    .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+                    .rotationEffect(.degrees(angles[index]))
+                    .offset(x: width * shifts[index], y: index == 1 ? -4 : 0)
+            }
+        }
+        .frame(width: width, height: height, alignment: .top)
+        .offset(y: height * 0.1)
+        .allowsHitTesting(false)
+    }
+
+    /// Задняя стенка: цвет папки, приглушённый к тёмному
+    private func back(_ shade: Double) -> Color {
+        accent.mix(with: .black, by: scheme == .dark ? shade + 0.15 : shade)
     }
 
     private var subtitle: String {
         // Вложенные папки — первыми: файлов в такой папке может не быть вовсе
         let folders = stats.subfolders > 0 ? pluralize(stats.subfolders, "папка", "папки", "папок") : nil
         guard stats.count > 0 else { return folders ?? "Пусто" }
-        let size = ByteCountFormatter.string(fromByteCount: stats.size, countStyle: .file)
-        if folder.kind == .feed {
-            let blocks = pluralize(stats.count, "блок", "блока", "блоков")
-            return stats.size > 0 ? "\(blocks) · \(size)" : blocks
-        }
-        let files = pluralize(stats.count, "файл", "файла", "файлов")
-        // Две части с размером не влезают в карточку — размер уступает место
-        guard let folders else { return "\(files) · \(size)" }
-        return "\(folders) · \(files)"
-    }
-}
-
-// Коллаж превью: один файл — во всю обложку, дальше мозаика
-private struct FolderCollage: View {
-    let files: [VaultFile]
-    let accent: Color
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let h = geo.size.height
-            let gap: CGFloat = 2
-
-            switch files.count {
-            case 1:
-                cell(files[0], CGSize(width: w, height: h))
-            case 2:
-                HStack(spacing: gap) {
-                    let side = (w - gap) / 2
-                    cell(files[0], CGSize(width: side, height: h))
-                    cell(files[1], CGSize(width: side, height: h))
-                }
-            case 3:
-                HStack(spacing: gap) {
-                    let big = (w - gap) * 0.62
-                    cell(files[0], CGSize(width: big, height: h))
-                    VStack(spacing: gap) {
-                        let side = (h - gap) / 2
-                        cell(files[1], CGSize(width: w - gap - big, height: side))
-                        cell(files[2], CGSize(width: w - gap - big, height: side))
-                    }
-                }
-            default:
-                VStack(spacing: gap) {
-                    let rowH = (h - gap) / 2
-                    let colW = (w - gap) / 2
-                    HStack(spacing: gap) {
-                        cell(files[0], CGSize(width: colW, height: rowH))
-                        cell(files[1], CGSize(width: colW, height: rowH))
-                    }
-                    HStack(spacing: gap) {
-                        cell(files[2], CGSize(width: colW, height: rowH))
-                        cell(files[3], CGSize(width: colW, height: rowH))
-                    }
-                }
-            }
-        }
-    }
-
-    private func cell(_ file: VaultFile, _ size: CGSize) -> some View {
-        FileThumbnail(file: file, accent: accent, size: size, cornerRadius: 0, showsBorder: false)
+        let files = folder.kind == .feed ? pluralize(stats.count, "блок", "блока", "блоков") : pluralize(stats.count, "файл", "файла", "файлов")
+        guard let folders else { return files }
+        return "\(folders), \(files)"
     }
 }

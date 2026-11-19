@@ -28,50 +28,51 @@ struct RecentStrip: View {
         }
     }
 
+    /// Лист документа, как в папке: превью с загнутым уголком, под ним имя и
+    /// папка с её цветной точкой — без подложки карточки
     private func card(for item: (file: VaultFile, folder: VaultFolder)) -> some View {
         let accent = Theme.color(item.folder.color)
-        // Шире, чем превью просит: отступы внутри карточки съедают место у имени
-        let side: CGFloat = 132
-        return VStack(alignment: .leading, spacing: 0) {
+        let side: CGFloat = 112
+        let curl: CGFloat = 18
+        return VStack(alignment: .leading, spacing: 7) {
             FileThumbnail(
                 file: item.file,
                 accent: accent,
-                size: CGSize(width: side, height: side),
+                size: CGSize(width: side, height: side * 1.25),
                 cornerRadius: 0,
                 showsBorder: false
             )
+            .clipShape(CutCornerRectangle(radius: 12, cut: curl))
+            .overlay(alignment: .topTrailing) { PageCurl(size: curl) }
             .overlay(alignment: .bottomLeading) {
                 if let badge = item.file.extensionBadge {
                     TypeBadge(text: badge)
                         .padding(7)
                 }
             }
+            .overlay(CutCornerRectangle(radius: 12, cut: curl).stroke(Theme.hairline, lineWidth: 1))
+            .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
 
             VStack(alignment: .leading, spacing: 3) {
                 // Без расширения и в две строки — иначе имя рвётся посередине
                 Text(item.file.displayName)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
                     .lineLimit(2, reservesSpace: true)
                     .multilineTextAlignment(.leading)
                 HStack(spacing: 4) {
                     Circle()
                         .fill(accent)
-                        .frame(width: 5, height: 5)
+                        .frame(width: 6, height: 6)
+                        .shadow(color: accent.opacity(0.8), radius: 3)
                     Text(item.folder.name)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
-            // maxWidth, а не фиксированная ширина: иначе padding расширил бы
-            // подпись шире превью и карточка перестала бы быть квадратной
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
         }
         .frame(width: side)
-        .background(Theme.card)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .cardBorder(cornerRadius: 16)
     }
 }

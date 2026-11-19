@@ -80,13 +80,20 @@ private struct StepRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: step.symbol)
                 .font(.footnote.weight(.semibold))
-                .foregroundStyle(isLive ? Theme.accent : Color.secondary)
+                .foregroundStyle(.secondary)
                 .symbolEffect(.pulse, options: .repeating, isActive: isLive && !reduceMotion)
                 .frame(width: 18)
-            Text(step.text)
-                .font(.footnote)
-                .foregroundStyle(isLive ? Theme.ink : Color.secondary)
-                .lineLimit(2)
+            // Текущий шаг — с бегущим бликом, как «Думаю…»; готовые — тише
+            if isLive {
+                ShimmerText(text: step.text)
+                    .font(.footnote)
+                    .lineLimit(2)
+            } else {
+                Text(step.text)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
             if isLive {
                 // Живой счётчик — у долгих шагов: облако, модель на iPhone
                 TimelineView(.periodic(from: step.startedAt, by: 1)) { context in

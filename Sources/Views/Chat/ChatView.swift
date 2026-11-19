@@ -11,6 +11,7 @@ struct ChatView: View {
     @Environment(SearchService.self) private var search
     @Environment(VaultStore.self) private var store
     @Environment(FactStore.self) private var facts
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
@@ -37,7 +38,7 @@ struct ChatView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Theme.background.ignoresSafeArea()
+                AppBackdrop()
 
                 if session.messages.isEmpty {
                     welcome
@@ -133,6 +134,20 @@ struct ChatView: View {
             session.useFiles(store)
             session.useFacts(facts)
             session.useGenUIHooks(genuiHooks)
+            // Кэш облака — заранее: первый вопрос не ждёт разбора инструкции и описи
+            session.prewarmCloud()
+            #if DEBUG
+            // Скриншоты: «-DemoQuestion "Дата рождения Ольги"» — вопрос сразу
+            if let question = DemoVault.argument("-DemoQuestion"), session.messages.isEmpty {
+                Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    session.send(question)
+                }
+            }
+            #endif
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { session.prewarmCloud() }
         }
         .confirmationDialog(
             confirmation?.title ?? "",
@@ -161,11 +176,13 @@ struct ChatView: View {
         return "Ответы — из ваших файлов, прямо на iPhone, без сети"
     }
 
-    /// Как в ChatGPT: одно приветствие по центру, без иконок и плашек
+    /// Приветствие по центру: шар агента, вопрос и куда уходят данные
     private var welcome: some View {
         GeometryReader { proxy in
             ScrollView {
                 VStack(spacing: 8) {
+                    AgentOrb(size: 72, isActive: true)
+                        .padding(.bottom, 14)
                     Text("Чем помочь?")
                         .font(.system(.title, weight: .semibold))
                         .foregroundStyle(Theme.ink)
@@ -184,6 +201,7 @@ struct ChatView: View {
     /// Подсказки прямо над полем ввода — лентой, которую листают пальцем
     private var suggestionsRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
+            GlassEffectContainer(spacing: 8) {
             HStack(spacing: 8) {
                 ForEach(Self.suggestions, id: \.text) { suggestion in
                     Button {
@@ -199,13 +217,14 @@ struct ChatView: View {
                         }
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
-                        .background(Theme.surface, in: Capsule())
+                        .glassEffect(.regular.interactive(), in: Capsule())
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("chatSuggestion")
                 }
             }
             .padding(.horizontal, 16)
+            }
         }
         .scrollClipDisabled()
     }
@@ -315,7 +334,7 @@ struct ChatView: View {
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(canSend ? AnyShapeStyle(Theme.background) : AnyShapeStyle(.tertiary))
                         .frame(width: 32, height: 32)
-                        .background(canSend ? Theme.ink : Theme.surface, in: Circle())
+                        .background(canSend ? Theme.ink : Theme.well, in: Circle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!canSend)
@@ -327,12 +346,8 @@ struct ChatView: View {
         }
         .padding(.leading, 6)
         .padding(.trailing, 6)
-        .background(Theme.card, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(Theme.border, lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+        // Стекло — системное (Liquid Glass): поле парит над перепиской
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .padding(.horizontal, 12)
         .padding(.bottom, 6)
     }
@@ -347,7 +362,7 @@ struct ChatView: View {
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(Theme.ink)
                 .frame(width: 32, height: 32)
-                .background(Theme.surface, in: Circle())
+                .background(Theme.well, in: Circle())
                 .accessibilityLabel("Вложение")
         }
         .padding(.bottom, 6)
@@ -512,13 +527,15 @@ private struct MessageRow: View {
                         .containerRelativeFrame(.horizontal, alignment: .trailing) { length, _ in length * 0.7 }
                 }
                 if !message.text.isEmpty {
-                    // Серый пузырь вопроса и тёмный текст — как в ChatGPT
+                    // Пузырь вопроса: в тёмной теме — графитовое стекло, днём —
+                    // чёрный с белым текстом (референсы владельца 19.11.2026)
                     Text(message.text)
                         .font(.body)
-                        .foregroundStyle(Theme.ink)
+                        .foregroundStyle(Theme.bubbleInk)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .background(Theme.bubble, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 0.5))
                         // Пузырь облегает текст, но не шире 80% экрана
                         .containerRelativeFrame(.horizontal, alignment: .trailing) { length, _ in length * 0.8 }
                         .accessibilityIdentifier("chatUserMessage")
@@ -526,6 +543,10 @@ private struct MessageRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         case .assistant:
+            HStack(alignment: .top, spacing: 12) {
+            // Шар агента: кружит, пока ответ идёт
+            AgentOrb(size: 24, isActive: message.isPending)
+                .padding(.top, 1)
             VStack(alignment: .leading, spacing: 10) {
                 if let notice = message.notice {
                     Label(notice, systemImage: "icloud.slash")
@@ -573,12 +594,12 @@ private struct MessageRow: View {
                         Label("Запомнить: это я — \(suggestion.name)", systemImage: "person.crop.circle.badge.checkmark")
                             .font(.subheadline.weight(.medium))
                     }
-                    .buttonStyle(.bordered)
-                    .tint(Theme.accent)
+                    .buttonStyle(.glass)
                     .accessibilityIdentifier("chatRememberOwner")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }
@@ -589,25 +610,11 @@ private struct TypingIndicator: View {
     @State private var isAnimating = false
 
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(Color.secondary)
-                    .frame(width: 7, height: 7)
-                    .opacity(isAnimating ? 1 : 0.3)
-                    .scaleEffect(isAnimating ? 1 : 0.75)
-                    .animation(
-                        reduceMotion ? nil : .easeInOut(duration: 0.55)
-                            .repeatForever()
-                            .delay(Double(index) * 0.18),
-                        value: isAnimating
-                    )
-            }
-        }
-        .padding(.vertical, 8)
-        .onAppear { isAnimating = !reduceMotion }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Ищу…")
+        ShimmerText(text: "Думаю…")
+            .font(.body)
+            .padding(.vertical, 2)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Ищу…")
     }
 }
 
@@ -663,8 +670,9 @@ private struct ReasoningBlock: View {
             } label: {
                 HStack(spacing: 4) {
                     if isLive, let startedAt {
+                        // «Думаю · 3 с» с бегущим бликом — как в референсе
                         TimelineView(.periodic(from: startedAt, by: 1)) { context in
-                            Text("Думает · \(max(0, Int(context.date.timeIntervalSince(startedAt)))) с")
+                            ShimmerText(text: "Думаю · \(max(0, Int(context.date.timeIntervalSince(startedAt)))) с")
                                 .monospacedDigit()
                         }
                     } else {
@@ -769,6 +777,6 @@ private struct ComposerChips: View {
             .fixedSize()
             .padding(.horizontal, 9)
             .frame(height: 32)
-            .background(Theme.surface, in: Capsule())
+            .background(Theme.well, in: Capsule())
     }
 }
