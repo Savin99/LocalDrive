@@ -5,12 +5,27 @@ struct SettingsView: View {
     @Environment(SearchService.self) private var search
     @Environment(VaultStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(FolderCardStyle.storageKey) private var folderStyle = FolderCardStyle.standard.rawValue
     @State private var showsRestore = false
     @State private var confirmsRestore = false
+    #if DEBUG
+    @State private var showsFolderStyles = false
+    #endif
 
     var body: some View {
         NavigationStack {
             List {
+                Section("Оформление") {
+                    AppearancePicker()
+                    // Образцы папок — на своём экране: в списке они вытесняли
+                    // «Безопасность» и «Скрытые папки» с первого экрана
+                    NavigationLink {
+                        FolderStyleSettingsView()
+                    } label: {
+                        LabeledContent("Вид папок", value: (FolderCardStyle(rawValue: folderStyle) ?? .standard).title)
+                    }
+                    .accessibilityIdentifier("settingsFolderStyle")
+                }
                 Section("Безопасность") {
                     NavigationLink {
                         BackupSettingsView()
@@ -134,6 +149,11 @@ struct SettingsView: View {
             .sheet(isPresented: $showsRestore) {
                 RestoreBackupView()
             }
+            #if DEBUG
+            // Скриншоты: «-OpenSettings -OpenFolderStyles» — сразу «Вид папок»
+            .navigationDestination(isPresented: $showsFolderStyles) { FolderStyleSettingsView() }
+            .task { showsFolderStyles = ProcessInfo.processInfo.arguments.contains("-OpenFolderStyles") }
+            #endif
             .confirmationDialog(
                 "Заменить файлы копией?",
                 isPresented: $confirmsRestore,

@@ -137,6 +137,8 @@ struct ChatView: View {
             // Кэш облака — заранее: первый вопрос не ждёт разбора инструкции и описи
             session.prewarmCloud()
             #if DEBUG
+            // Скриншоты: «-OpenSettings» — сразу настройки
+            if ProcessInfo.processInfo.arguments.contains("-OpenSettings") { showsSettings = true }
             // Скриншоты: «-DemoQuestion "Дата рождения Ольги"» — вопрос сразу
             if let question = DemoVault.argument("-DemoQuestion"), session.messages.isEmpty {
                 Task {

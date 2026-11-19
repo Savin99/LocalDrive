@@ -10,6 +10,8 @@ struct LocalDriveApp: App {
     @State private var models = ChatModelStore()
     @State private var chat: ChatSession
     @Environment(\.scenePhase) private var scenePhase
+    /// Оформление из настроек: как в системе, светлое или тёмное
+    @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.system.rawValue
 
     init() {
         let store = VaultStore()
@@ -38,6 +40,7 @@ struct LocalDriveApp: App {
                 .environment(models)
                 .environment(chat)
                 .tint(Theme.accent)
+                .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
                 #if DEBUG
                 // Демо-хранилище для скриншотов: запуск с -DemoVault
                 .task { DemoVault.seedIfNeeded(store: store, search: search) }
