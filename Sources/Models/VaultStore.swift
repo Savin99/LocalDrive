@@ -688,8 +688,18 @@ final class VaultStore {
     }
 
     /// Последние файлы папки — для коллажа на её карточке
+    /// Превью папки: сначала её файлы, потом — из вложенных папок. У папки с
+    /// одними папками внутри иначе торчал пустой лист (сборка 22 на iPhone
+    /// владельца). Суперскрытые вложенные — никогда
     func previewFiles(in folder: VaultFolder, limit: Int = 4) -> [VaultFile] {
-        Array(files(in: folder).prefix(limit))
+        var result = Array(files(in: folder).prefix(limit))
+        var queue = children(of: folder.id).filter { !$0.isSuperHidden }
+        while result.count < limit, !queue.isEmpty {
+            let next = queue.removeFirst()
+            result += files(in: next).prefix(limit - result.count)
+            queue += children(of: next.id).filter { !$0.isSuperHidden }
+        }
+        return result
     }
 
     /// Недавно добавленное по всем папкам
