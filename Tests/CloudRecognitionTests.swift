@@ -610,6 +610,24 @@ final class CloudPassTests: XCTestCase {
         XCTAssertFalse(store.isEnabled, "распознавание — как настроил владелец")
     }
 
+    /// Сборка 23: чипов модели и рассуждения нет — выбранное раньше (Sol,
+    /// «Быстро») сбрасывается один раз, дальше сохранённое не трогается
+    func testLunaOnlyResetsStoredChatChoiceOnce() {
+        let suite = "LunaOnly-\(UUID().uuidString)"
+        let upgraded = UserDefaults(suiteName: suite)!
+        defer { upgraded.removePersistentDomain(forName: suite) }
+        upgraded.set(true, forKey: "chat.cloudFirst")
+        upgraded.set(CloudChatModel.sol.rawValue, forKey: "chat.model")
+        upgraded.set(CloudChatReasoning.fast.rawValue, forKey: "chat.reasoning")
+        let store = CloudRecognitionStore(defaults: upgraded, keychainService: keychainService)
+        XCTAssertEqual(store.chatModel, .luna, "Sol с поля ввода сброшен на Luna")
+        XCTAssertEqual(store.chatReasoning, .auto, "«Быстро» сброшено на «Авто»")
+
+        store.setChatModel(.sol)
+        let again = CloudRecognitionStore(defaults: upgraded, keychainService: keychainService)
+        XCTAssertEqual(again.chatModel, .sol, "сброс — один раз, не при каждом запуске")
+    }
+
     func testKeyIsKeptInKeychainOnlyPerProvider() {
         let settings = CloudRecognitionStore(defaults: defaults, keychainService: keychainService)
         XCTAssertEqual(settings.provider, .openAI, "облако по умолчанию — OpenAI")

@@ -66,6 +66,8 @@ final class CloudRecognitionStore {
         static let autoEnabled = "cloud.autoEnabled"
         /// Переход на «только облако» сделан: «iPhone» на поле ввода сброшен
         static let cloudFirst = "chat.cloudFirst"
+        /// Чипов модели и рассуждения на поле ввода больше нет: выбранное раньше сброшено
+        static let lunaOnly = "chat.lunaOnly"
     }
 
     /// Прежний общий ключ. Ключи сервисов — «<этот адрес>.openai» и «….gemini»
@@ -139,20 +141,29 @@ final class CloudRecognitionStore {
             }
             defaults.set(true, forKey: Key.cloudFirst)
         }
+        // Владелец 19.11.2026, сборка 22: «селектор моделей и размышление можно
+        // убрать — Luna достаточно». Чипов нет — выбранное раньше («Быстро»,
+        // Sol) сбрасывается один раз: модель сервиса по умолчанию и «Авто»
+        if !defaults.bool(forKey: Key.lunaOnly) {
+            defaults.removeObject(forKey: Key.chatModel)
+            defaults.removeObject(forKey: Key.chatReasoning)
+            defaults.set(true, forKey: Key.lunaOnly)
+        }
     }
 
     // MARK: - Чат
 
-    /// Модель чата: выбранная на поле ввода, если она этого сервиса, иначе —
-    /// модель сервиса по умолчанию. «iPhone» — всегда «iPhone»
+    /// Модель чата: сохранённая, если она этого сервиса, иначе — модель
+    /// сервиса по умолчанию. Выбора на поле ввода больше нет (владелец, сборка
+    /// 22: «Luna достаточно»), прежний выбор сброшен миграцией `lunaOnly`
     var chatModel: CloudChatModel {
         guard let storedChatModel else { return CloudChatModel.defaultModel(for: provider) }
         if storedChatModel == .local || storedChatModel.provider == provider { return storedChatModel }
         return CloudChatModel.defaultModel(for: provider)
     }
 
-    /// Можно ли сейчас отвечать в чате облаком: включено, есть ключ, на поле
-    /// ввода выбрана облачная модель
+    /// Можно ли сейчас отвечать в чате облаком: включено, есть ключ, модель
+    /// облачная
     var chatConfiguration: CloudChatEngine.Configuration? {
         guard chatEnabled, chatModel != .local, let key = apiKey, !key.isEmpty else { return nil }
         return CloudChatEngine.Configuration(provider: provider, baseURL: baseURL, apiKey: key, model: chatModel, reasoning: chatReasoning)

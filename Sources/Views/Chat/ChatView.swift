@@ -307,9 +307,6 @@ struct ChatView: View {
                 .padding(.vertical, 11)
                 .accessibilityIdentifier("chatInput")
 
-            ComposerChips(cloud: search.cloud)
-                .padding(.bottom, 6)
-
             // Пока отвечает облако, на месте «Отправить» — «Стоп»: ответ
             // обрывается, а то, что успело прийти, остаётся
             if session.answeringInCloud {
@@ -710,73 +707,3 @@ private struct ReasoningBlock: View {
     }
 }
 
-/// Чипы на поле ввода: модель («Luna», «Sol», «Astra» или «Flash», «Lite» —
-/// по выбранному сервису — и «iPhone») и сколько ей думать.
-/// Подписи короткие — поле остаётся в одну строку. Пока облачный чат выключен
-/// или нет ключа, облачные модели в меню недоступны
-private struct ComposerChips: View {
-    let cloud: CloudRecognitionStore
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Menu {
-                Section {
-                    ForEach(CloudChatModel.choices(for: cloud.provider), id: \.self) { model in
-                        Button {
-                            cloud.setChatModel(model)
-                        } label: {
-                            if effectiveModel == model {
-                                Label(model.title, systemImage: "checkmark")
-                            } else {
-                                Text(model.title)
-                            }
-                        }
-                        .disabled(model != .local && !cloud.chatAvailable)
-                    }
-                } footer: {
-                    if !cloud.chatAvailable {
-                        Text("Облачные модели — в «Настройки → Облачное распознавание → Чат через облако»")
-                    }
-                }
-            } label: {
-                chip(effectiveModel.chip)
-            }
-            .accessibilityIdentifier("chatModelChip")
-
-            if effectiveModel != .local {
-                Menu {
-                    ForEach(CloudChatReasoning.allCases, id: \.self) { reasoning in
-                        Button {
-                            cloud.setChatReasoning(reasoning)
-                        } label: {
-                            if cloud.chatReasoning == reasoning {
-                                Label(reasoning.title, systemImage: "checkmark")
-                            } else {
-                                Text(reasoning.title)
-                            }
-                        }
-                    }
-                } label: {
-                    chip(cloud.chatReasoning.chip)
-                }
-                .accessibilityIdentifier("chatReasoningChip")
-            }
-        }
-    }
-
-    /// Без облачного чата отвечает iPhone, что бы ни было выбрано
-    private var effectiveModel: CloudChatModel {
-        cloud.chatAvailable ? cloud.chatModel : .local
-    }
-
-    private func chip(_ text: String) -> some View {
-        Text(text)
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(Theme.ink)
-            .lineLimit(1)
-            .fixedSize()
-            .padding(.horizontal, 9)
-            .frame(height: 32)
-            .background(Theme.well, in: Capsule())
-    }
-}
