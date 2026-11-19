@@ -295,7 +295,9 @@ struct HomeView: View {
                 .padding(.horizontal, 20)
             }
             .padding(.top, 4)
-            .padding(.bottom, 28)
+            // Нижний ряд папок прокручивается выше плавающего поля поиска:
+            // иначе нажатие на подпись у края доставалось полю
+            .padding(.bottom, 96)
         }
         // Как в чате: папки не просвечивают сквозь кнопки шапки
         .scrollEdgeEffectStyle(.hard, for: .top)
