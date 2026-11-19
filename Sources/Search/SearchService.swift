@@ -353,9 +353,27 @@ final class SearchService {
             guard let name = values.first(where: { $0.key == FieldKey.fullName })?.value, Self.isCyrillic(name) else { continue }
             cyrillicNames[ChatRouter.personKey(name)] = name
         }
+        // Развороты паспорта РФ — отдельные документы без ФИО (прописка, брак):
+        // модель считала их паспортами — «5 паспортов» вместо 4. Разворот
+        // помечается и получает владельца, если в его папке один такой паспорт
+        var mainPassports: [UUID: [(id: Int64, owner: String)]] = [:]
+        for document in documents where document.type == .passportRU {
+            guard let name = fields[document.id]?.first(where: { $0.key == FieldKey.fullName })?.value, !name.isEmpty else { continue }
+            mainPassports[document.folderID, default: []].append((document.id, name))
+        }
         return documents.compactMap { document -> String? in
             guard let folder = folders[document.folderID] else { return nil }
-            let owner = fields[document.id]?.first { $0.key == FieldKey.fullName }?.value ?? ""
+            var owner = fields[document.id]?.first { $0.key == FieldKey.fullName }?.value ?? ""
+            var spread: String?
+            if details, document.type == .passportRU, owner.isEmpty {
+                let candidates = mainPassports[document.folderID] ?? []
+                if candidates.count == 1, let main = candidates.first {
+                    owner = main.owner
+                    spread = "разворот паспорта \(ChatCard.encodeID(main.id)), не отдельный паспорт"
+                } else {
+                    spread = "разворот паспорта РФ, не отдельный паспорт"
+                }
+            }
             let meta = metadata[document.id]
             let kind = [document.type.rawValue, meta?.kind.nilIfEmpty].compactMap { $0 }.joined(separator: "/")
             // Полное имя — чтобы «Ольга» находилась по описи, а не поиском:
@@ -376,6 +394,7 @@ final class SearchService {
                DocumentReadingMerge.date(until) != nil {
                 line += " · до \(until)"
             }
+            if let spread { line += " · " + spread }
             if details { line += Self.details(values, meta).map { " · " + $0 }.joined() }
             return line
         }.joined(separator: "\n")
