@@ -659,9 +659,11 @@ struct FolderDetailView: View {
             let padding: CGFloat = 20
             let side = (geo.size.width - padding * 2 - spacing) / 2
 
+            // Листы — разной высоты, по пропорциям документов: в ряду они
+            // стоят на одной линии, подписи — под ней
             let columns = [
-                GridItem(.fixed(side), spacing: spacing),
-                GridItem(.fixed(side), spacing: spacing),
+                GridItem(.fixed(side), spacing: spacing, alignment: .bottom),
+                GridItem(.fixed(side), spacing: spacing, alignment: .bottom),
             ]
 
             ScrollView {

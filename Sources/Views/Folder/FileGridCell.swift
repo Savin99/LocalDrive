@@ -1,8 +1,8 @@
 import SwiftUI
 
-// Карточка сетки — сам лист документа: превью со скруглением и загнутым
-// уголком, под ним имя и размер, без подложки (референсы владельца 19.11.2026).
-// Фото и видео — без уголка: это не бумага
+// Карточка сетки — сам лист документа в его пропорциях (FileSheet): превью
+// со скруглением и загнутым уголком, под ним имя и размер, без подложки
+// (референсы владельца 19.11.2026)
 struct FileGridCell: View {
     let file: VaultFile
     let accent: Color
@@ -12,63 +12,8 @@ struct FileGridCell: View {
     /// листе, как в референсе: подкраска и галочка, без рамки вокруг подписи
     var selection: Bool? = nil
 
-    private var isVideo: Bool {
-        file.type.conforms(to: .movie) || file.type.conforms(to: .video)
-    }
-
-    private var curl: CGFloat { isVideo ? 0 : max(18, side * 0.17) }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            FileThumbnail(
-                file: file,
-                accent: accent,
-                size: CGSize(width: side, height: side * 1.18),
-                cornerRadius: 0,
-                showsBorder: false
-            )
-            // Лист со срезанным уголком, подгиб — поверх
-            .clipShape(CutCornerRectangle(radius: 14, cut: curl))
-            .overlay(alignment: .topTrailing) {
-                if isVideo {
-                    Image(systemName: "play.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.4), radius: 4)
-                        .padding(8)
-                } else {
-                    PageCurl(size: curl)
-                }
-            }
-            .overlay(alignment: .bottomLeading) {
-                if let badge = file.extensionBadge {
-                    TypeBadge(text: badge)
-                        .padding(8)
-                }
-            }
-            .overlay {
-                if selection == true {
-                    ZStack {
-                        CutCornerRectangle(radius: 14, cut: curl).fill(accent.opacity(0.32))
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .fill(accent)
-                            .frame(width: 42, height: 42)
-                            .overlay(Image(systemName: "checkmark").font(.system(size: 19, weight: .bold)).foregroundStyle(.white))
-                            .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
-                    }
-                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                }
-            }
-            .overlay(alignment: .topLeading) {
-                if selection == false {
-                    FileSelectionMark(isSelected: false, accent: accent)
-                        .padding(8)
-                }
-            }
-            .animation(.snappy(duration: 0.18), value: selection)
-            .overlay(CutCornerRectangle(radius: 14, cut: curl).stroke(Theme.hairline, lineWidth: 1))
-            .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
-
+        FileSheet(file: file, accent: accent, fit: .width(side), selection: selection) {
             VStack(alignment: .leading, spacing: 2) {
                 // Без расширения и в две строки — иначе имя рвётся посередине
                 Text(file.displayName)
@@ -80,7 +25,6 @@ struct FileGridCell: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 2)
         }
         .contentShape(Rectangle())

@@ -12,7 +12,8 @@ struct RecentStrip: View {
                 .padding(.horizontal, 20)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
+                // Листы разной ширины стоят на одной линии, подписи — под ней
+                HStack(alignment: .top, spacing: 12) {
                     ForEach(items, id: \.file.id) { item in
                         Button {
                             onSelect(item.file)
@@ -28,31 +29,12 @@ struct RecentStrip: View {
         }
     }
 
-    /// Лист документа, как в папке: превью с загнутым уголком, под ним имя и
-    /// папка с её цветной точкой — без подложки карточки
+    /// Лист документа, как в папке: превью в своих пропорциях с загнутым
+    /// уголком, под ним имя и папка с её цветной точкой — без подложки карточки.
+    /// Высота у всех одна, ширина — по документу: банковская карта шире страницы
     private func card(for item: (file: VaultFile, folder: VaultFolder)) -> some View {
         let accent = Theme.color(item.folder.color)
-        let side: CGFloat = 112
-        let curl: CGFloat = 18
-        return VStack(alignment: .leading, spacing: 7) {
-            FileThumbnail(
-                file: item.file,
-                accent: accent,
-                size: CGSize(width: side, height: side * 1.25),
-                cornerRadius: 0,
-                showsBorder: false
-            )
-            .clipShape(CutCornerRectangle(radius: 12, cut: curl))
-            .overlay(alignment: .topTrailing) { PageCurl(size: curl) }
-            .overlay(alignment: .bottomLeading) {
-                if let badge = item.file.extensionBadge {
-                    TypeBadge(text: badge)
-                        .padding(7)
-                }
-            }
-            .overlay(CutCornerRectangle(radius: 12, cut: curl).stroke(Theme.hairline, lineWidth: 1))
-            .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
-
+        return FileSheet(file: item.file, accent: accent, fit: .height(140), radius: 12, spacing: 7) {
             VStack(alignment: .leading, spacing: 3) {
                 // Без расширения и в две строки — иначе имя рвётся посередине
                 Text(item.file.displayName)
@@ -71,8 +53,6 @@ struct RecentStrip: View {
                         .lineLimit(1)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: side)
     }
 }

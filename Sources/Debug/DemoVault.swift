@@ -42,9 +42,9 @@ enum DemoVault {
         // Папка с одними вложенными папками — как «RUDN» у владельца: её превью
         // берутся из вложенных
         if let parent = store.createFolder(name: "Учёба", icon: "graduationcap.fill", color: "indigo") {
-            for (name, page) in [("Диплом", studyPages[0]), ("Школа", studyPages[1])] {
+            for (name, pages) in [("Диплом", [studyPages[0], studyPages[2]]), ("Школа", [studyPages[1]])] {
                 if let child = store.createFolder(name: name, icon: "folder.fill", color: "indigo", parentID: parent.id) {
-                    fill(child, with: [page], store: store)
+                    fill(child, with: pages, store: store)
                 }
             }
         }
@@ -53,8 +53,19 @@ enum DemoVault {
 
     private static func fill(_ folder: VaultFolder, with pages: [Page], store: VaultStore) {
         for page in pages {
-            guard let data = render(page)?.jpegData(compressionQuality: 0.85) else { continue }
+            guard let image = render(page) else { continue }
+            // «.pdf» — страница PDF: у неё своё превью и свои пропорции
+            let data = page.file.hasSuffix(".pdf") ? pdf(of: image) : image.jpegData(compressionQuality: 0.85)
+            guard let data else { continue }
             _ = store.importData(data, preferredName: page.file, to: folder)
+        }
+    }
+
+    private static func pdf(of image: UIImage) -> Data {
+        let bounds = CGRect(origin: .zero, size: CGSize(width: image.size.width / 2, height: image.size.height / 2))
+        return UIGraphicsPDFRenderer(bounds: bounds).pdfData { context in
+            context.beginPage()
+            image.draw(in: bounds)
         }
     }
 
@@ -64,6 +75,8 @@ enum DemoVault {
         let lines: [String]
         var tint: UIColor = .white
         var photo = false
+        /// Горизонтальный лист: карта, сертификат
+        var landscape = false
     }
 
     private struct Folder {
@@ -80,6 +93,9 @@ enum DemoVault {
              tint: UIColor(red: 0.95, green: 0.93, blue: 0.86, alpha: 1)),
         Page(file: "справка из школы.jpg", title: "СПРАВКА",
              lines: ["Дана Савиной Камиле Ильиничне", "в том, что она обучается во 2 классе", "ГБОУ «Школа № 1234»"]),
+        Page(file: "сертификат Ильи.pdf", title: "СЕРТИФИКАТ",
+             lines: ["Илья Савин", "является сертифицированным специалистом", "в области анализа данных"],
+             tint: UIColor(red: 0.9, green: 0.95, blue: 0.98, alpha: 1), landscape: true),
     ]
 
     private static let passportTint = UIColor(red: 0.98, green: 0.93, blue: 0.93, alpha: 1)
@@ -111,7 +127,7 @@ enum DemoVault {
                          "Страховая премия 8 900 руб."]),
             Page(file: "права Ильи.jpg", title: "ВОДИТЕЛЬСКОЕ УДОСТОВЕРЕНИЕ",
                  lines: ["САВИН ИЛЬЯ АНДРЕЕВИЧ", "01.01.1990", "Выдано 10.07.2019", "Действительно до 10.07.2029", "Категории B, B1"],
-                 tint: UIColor(red: 0.93, green: 0.97, blue: 0.94, alpha: 1), photo: true),
+                 tint: UIColor(red: 0.93, green: 0.97, blue: 0.94, alpha: 1), photo: true, landscape: true),
         ]),
         Folder(name: "Квартира", icon: "house.fill", color: "orange", pages: [
             Page(file: "договор аренды.jpg", title: "ДОГОВОР АРЕНДЫ ЖИЛОГО ПОМЕЩЕНИЯ",
@@ -142,7 +158,7 @@ enum DemoVault {
 
     /// Страница документа: заголовок, строки текста, у удостоверений — место фото
     private static func render(_ page: Page) -> UIImage? {
-        let size = CGSize(width: 1200, height: 1600)
+        let size = page.landscape ? CGSize(width: 1600, height: 1130) : CGSize(width: 1200, height: 1600)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         return UIGraphicsImageRenderer(size: size, format: format).image { context in
@@ -163,7 +179,7 @@ enum DemoVault {
                 y += 110
             }
             UIColor(white: 0.85, alpha: 1).setFill()
-            for row in 0..<5 {
+            for row in 0..<(page.landscape ? 2 : 5) {
                 context.fill(CGRect(x: 90, y: max(y, 900) + CGFloat(row) * 70, width: size.width - 180 - CGFloat(row % 2) * 240, height: 22))
             }
         }

@@ -48,11 +48,11 @@ struct FolderCard: View {
         let count = stats.count + stats.subfolders
         switch style {
         case .portfolio:
-            PortfolioFolderArt(folder: folder, accent: accent, count: count, isDropTarget: isDropTarget)
+            PortfolioFolderArt(folder: folder, accent: accent, count: count, preview: preview, isDropTarget: isDropTarget)
         case .scans:
             ScansFolderArt(folder: folder, accent: accent, preview: preview, isDropTarget: isDropTarget)
         case .black:
-            BlackFolderArt(folder: folder, accent: accent, count: count, isDropTarget: isDropTarget)
+            BlackFolderArt(folder: folder, accent: accent, count: count, preview: preview, isDropTarget: isDropTarget)
         case .card:
             CardFolderArt(folder: folder, accent: accent, preview: preview, subtitle: subtitle, isEmpty: count == 0, isDropTarget: isDropTarget)
         }

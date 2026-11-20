@@ -69,14 +69,18 @@ struct FolderPocket: Shape {
 
 // MARK: - «Портфолио»
 
-/// Светло-серое матовое стекло. Из-за стенки выглядывают листы: белый с
-/// загнутым уголком спереди, за ним пастельные цвета папки; сквозь стекло они
-/// видны размытым пятном. Наклейка — справа внизу
+/// Светло-серое матовое стекло. Из-за стенки выглядывают листы с загнутым
+/// уголком — последние файлы папки, верхом документа наружу; сквозь стекло
+/// они видны размытым пятном. Наклейка — справа внизу. В сборках 23–24 листы
+/// были пустые, белый и пастельные (владелец 19.11.2026: «почему у папок нет
+/// превью вложений»); такие остались у папки без файлов с превью
 struct PortfolioFolderArt: View {
     let folder: VaultFolder
     let accent: Color
     /// Сколько всего в папке: листов выглядывает не больше трёх, у пустой — ни одного
     let count: Int
+    /// Последние файлы — свои и из вложенных папок
+    let preview: [VaultFile]
     let isDropTarget: Bool
 
     @Environment(\.colorScheme) private var scheme
@@ -100,9 +104,11 @@ struct PortfolioFolderArt: View {
                 front
                     .fill(dark ? Color(white: 0.2) : Color(white: 0.9))
                     .shadow(color: .black.opacity(dark ? 0.45 : 0.07), radius: size.width * 0.06, y: size.width * 0.03)
+                // С превью стекло прозрачнее: документ за ним угадывается, а
+                // не сливается в серое пятно, как пустые листы
                 sheets(size)
-                    .blur(radius: size.width * 0.05)
-                    .opacity(dark ? 0.4 : 0.6)
+                    .blur(radius: size.width * (preview.isEmpty ? 0.05 : 0.022))
+                    .opacity(preview.isEmpty ? (dark ? 0.4 : 0.6) : (dark ? 0.62 : 0.72))
                     .mask(front)
                 front.fill(LinearGradient(colors: [.white.opacity(dark ? 0.07 : 0.45), .white.opacity(0)], startPoint: .top, endPoint: .bottom))
                 front.stroke(LinearGradient(colors: [.white.opacity(dark ? 0.22 : 1), .white.opacity(dark ? 0.04 : 0.5)], startPoint: .top, endPoint: .bottom),
@@ -114,23 +120,78 @@ struct PortfolioFolderArt: View {
         .accessibilityHidden(true)
     }
 
-    /// Листы правее середины: последний — белый, ниже — пастельные
+    /// Листы правее середины: самый новый файл — спереди. Без превью — белый
+    /// лист и пастельные за ним
     private func sheets(_ size: CGSize) -> some View {
-        let layout: [(x: CGFloat, angle: Double, tint: Double)] = switch min(count, 3) {
+        let files = Array(preview.prefix(3).reversed())
+        let layout: [(x: CGFloat, angle: Double, tint: Double)] = switch files.isEmpty ? min(count, 3) : files.count {
         case 0: []
         case 1: [(0.56, 3, 0)]
         case 2: [(0.42, -6, 0.5), (0.63, 4, 0)]
         default: [(0.3, -8, 0.3), (0.5, -2, 0.55), (0.68, 5, 0)]
         }
         return ZStack {
-            ForEach(Array(layout.enumerated()), id: \.offset) { _, sheet in
-                PaperSheet(tint: accent.opacity(sheet.tint))
-                    .frame(width: size.width * 0.36, height: size.height * 0.5)
-                    .rotationEffect(.degrees(sheet.angle))
-                    .position(x: size.width * sheet.x, y: size.height * 0.3)
+            ForEach(Array(layout.enumerated()), id: \.offset) { index, sheet in
+                if files.indices.contains(index) {
+                    // Лист с превью выше пустого и выглядывает до верха рамки:
+                    // над стенкой видна шапка документа
+                    PreviewSheet(file: files[index], accent: accent, width: size.width * 0.36, height: size.height * 0.58, cut: 0.24, radius: 0.07)
+                        .rotationEffect(.degrees(sheet.angle))
+                        .position(x: size.width * sheet.x, y: size.height * 0.3)
+                } else {
+                    PaperSheet(tint: accent.opacity(sheet.tint))
+                        .frame(width: size.width * 0.36, height: size.height * 0.5)
+                        .rotationEffect(.degrees(sheet.angle))
+                        .position(x: size.width * sheet.x, y: size.height * 0.3)
+                }
             }
         }
         .frame(width: size.width, height: size.height)
+    }
+}
+
+/// Лист с превью файла, выглядывающий из папки: виден верх документа,
+/// горизонтальный документ — лист шире. Низ листа всё равно за стенкой
+struct PreviewSheet: View {
+    let file: VaultFile
+    let accent: Color
+    /// Ширина вертикального листа; горизонтальный — в `widening` раз шире
+    let width: CGFloat
+    let height: CGFloat
+    /// Срез уголка и радиус углов — доли ширины вертикального листа; 0 — без уголка
+    var cut: CGFloat = 0
+    var radius: CGFloat = 0.1
+
+    @State private var aspect: CGFloat?
+
+    private static var widening: CGFloat { 1.35 }
+
+    init(file: VaultFile, accent: Color, width: CGFloat, height: CGFloat, cut: CGFloat = 0, radius: CGFloat = 0.1) {
+        self.file = file
+        self.accent = accent
+        self.width = width
+        self.height = height
+        self.cut = cut
+        self.radius = radius
+        _aspect = State(initialValue: FileThumbnail.cachedAspect(of: file))
+    }
+
+    var body: some View {
+        let isWide = (aspect ?? 0) > 1.15
+        let shape = CutCornerRectangle(radius: width * radius, cut: width * cut)
+        // Запрос крупнее листа: превью вписывается в рамку, а лист оно заливает
+        FileThumbnail(file: file, accent: accent, size: CGSize(width: width * Self.widening * 1.5, height: height * 1.5),
+                      cornerRadius: 0, showsBorder: false, fills: true, alignment: .top) { loaded in
+            guard abs((aspect ?? 0) - loaded) > 0.01 else { return }
+            aspect = loaded
+        }
+        .frame(width: isWide ? width * Self.widening : width, height: height, alignment: .top)
+        .background(.white)
+        .clipShape(shape)
+        .overlay(alignment: .topTrailing) {
+            if cut > 0 { PageCurl(size: width * cut) }
+        }
+        .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
     }
 }
 
@@ -257,6 +318,8 @@ struct BlackFolderArt: View {
     let folder: VaultFolder
     let accent: Color
     let count: Int
+    /// Последние файлы: листы — их превью; без превью — белые со строками
+    let preview: [VaultFile]
     let isDropTarget: Bool
 
     private let back = FolderFront(top: 0, tab: 0.45, step: 0.11, radius: 0.07)
@@ -300,18 +363,26 @@ struct BlackFolderArt: View {
     }
 
     private func sheets(_ size: CGSize) -> some View {
-        let layout: [(x: CGFloat, top: CGFloat, width: CGFloat, angle: Double)] = switch min(count, 3) {
+        // Самый новый файл — на переднем, среднем листе
+        let files = Array(preview.prefix(3).reversed())
+        let layout: [(x: CGFloat, top: CGFloat, width: CGFloat, angle: Double)] = switch files.isEmpty ? min(count, 3) : files.count {
         case 0: []
         case 1: [(0.52, 0.2, 0.34, -3)]
         case 2: [(0.36, 0.26, 0.28, -5), (0.6, 0.18, 0.34, 3)]
         default: [(0.26, 0.27, 0.24, 0), (0.79, 0.3, 0.22, 0), (0.53, 0.17, 0.34, -5)]
         }
         return ZStack {
-            ForEach(Array(layout.enumerated()), id: \.offset) { _, sheet in
-                LinedSheet()
-                    .frame(width: size.width * sheet.width, height: size.height * 0.46)
-                    .rotationEffect(.degrees(sheet.angle))
-                    .position(x: size.width * sheet.x, y: size.height * (sheet.top + 0.23))
+            ForEach(Array(layout.enumerated()), id: \.offset) { index, sheet in
+                Group {
+                    if files.indices.contains(index) {
+                        PreviewSheet(file: files[index], accent: accent, width: size.width * sheet.width, height: size.height * 0.46)
+                    } else {
+                        LinedSheet()
+                            .frame(width: size.width * sheet.width, height: size.height * 0.46)
+                    }
+                }
+                .rotationEffect(.degrees(sheet.angle))
+                .position(x: size.width * sheet.x, y: size.height * (sheet.top + 0.23))
             }
         }
         .frame(width: size.width, height: size.height)

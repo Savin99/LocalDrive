@@ -17,6 +17,19 @@ private final class ThumbnailCache {
     func store(_ image: UIImage, for key: String) {
         cache.setObject(image, forKey: key as NSString)
     }
+
+    /// Пропорции листа (ширина к высоте) — по пути файла, без размера: лист
+    /// сразу рисуется своей формы, а не прыгает, когда догрузится превью
+    private let aspects = NSCache<NSString, NSNumber>()
+
+    func aspect(for path: String) -> CGFloat? {
+        aspects.object(forKey: path as NSString).map { CGFloat($0.doubleValue) }
+    }
+
+    func storeAspect(of image: UIImage, for path: String) {
+        guard image.size.width > 0, image.size.height > 0 else { return }
+        aspects.setObject(NSNumber(value: Double(image.size.width / image.size.height)), forKey: path as NSString)
+    }
 }
 
 // Миниатюра файла: реальное содержимое (фото, первая страница документа),
@@ -31,6 +44,16 @@ struct FileThumbnail: View {
     /// Занять предложенное место вместо фиксированного `size`: в ряду ленты
     /// размеры ячеек считает раскладка, а `size` нужен только для запроса превью
     var fills: Bool = false
+    /// Какой край превью виден, когда оно обрезается: у листа, выглядывающего
+    /// из папки, — верх документа
+    var alignment: Alignment = .center
+    /// Пропорции превью (ширина к высоте), когда оно загрузилось
+    var onAspect: ((CGFloat) -> Void)?
+
+    /// Пропорции файла, если его превью уже грузили
+    static func cachedAspect(of file: VaultFile) -> CGFloat? {
+        ThumbnailCache.shared.aspect(for: file.url.path)
+    }
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: UIImage?
@@ -70,9 +93,10 @@ struct FileThumbnail: View {
         }
         .frame(
             maxWidth: fills ? .infinity : size.width,
-            maxHeight: fills ? .infinity : size.height
+            maxHeight: fills ? .infinity : size.height,
+            alignment: alignment
         )
-        .frame(width: fills ? nil : size.width, height: fills ? nil : size.height)
+        .frame(width: fills ? nil : size.width, height: fills ? nil : size.height, alignment: alignment)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
             // Тонкая обводка: без неё светлые превью (страница текста) сливаются с фоном
@@ -102,7 +126,7 @@ struct FileThumbnail: View {
         }
 
         if let cached = ThumbnailCache.shared.image(for: cacheKey) {
-            image = cached
+            show(cached)
             return
         }
 
@@ -116,11 +140,17 @@ struct FileThumbnail: View {
         do {
             let thumb = try await QLThumbnailGenerator.shared.generateBestRepresentation(for: request)
             ThumbnailCache.shared.store(thumb.uiImage, for: cacheKey)
-            image = thumb.uiImage
+            show(thumb.uiImage)
         } catch {
             // Тип без превью (архив, неизвестный формат) — показываем иконку
             failed = true
         }
+    }
+
+    private func show(_ loaded: UIImage) {
+        ThumbnailCache.shared.storeAspect(of: loaded, for: file.url.path)
+        image = loaded
+        if loaded.size.height > 0 { onAspect?(loaded.size.width / loaded.size.height) }
     }
 
     // Первые строки текстового файла для превью
