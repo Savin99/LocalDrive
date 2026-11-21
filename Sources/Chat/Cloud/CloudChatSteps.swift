@@ -39,7 +39,7 @@ enum CloudChatSteps {
             let query = masked(arguments["query"]?.string ?? "")
             return (.search, query.isEmpty ? "Смотрю «Карточки»" : "Ищу в «Карточках»: «\(query)»")
         case "show_fact_card":
-            let title = arguments["id"]?.string.flatMap { CloudChatFactTools.decodeID($0) }.flatMap { facts?.card(id: $0)?.title }
+            let title = arguments["id"]?.string.flatMap { CloudChatFactTools.decodeID($0, in: facts) }.flatMap { facts?.card(id: $0)?.title }
             return (.open, title.map { "Открываю карточку «\($0)»" } ?? "Открываю карточку")
         case "propose_fact_card":
             let title = arguments["title"]?.string ?? ""

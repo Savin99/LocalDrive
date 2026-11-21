@@ -192,4 +192,60 @@ final class FactChatTests: XCTestCase {
         XCTAssertEqual(draft.title, "Дом Камилы")
         XCTAssertTrue(facts.cards.isEmpty, "карточка сохранилась без «Сохранить»")
     }
+
+    /// Короткие номера карточек (f1, f2…), стабильный порядок при правке и
+    /// безопасные описания в описи облака: адрес и заметка видны, коды и Wi-Fi — нет
+    func testCloudFactToolsUseShortIDsAndSafeDetails() async throws {
+        var speech = FactCard(
+            title: "Логопед Николая",
+            symbol: "figure.child",
+            items: [
+                FactItem(kind: .address, label: "Адрес", value: "Москва, проспект Маршала Жукова, 28"),
+                FactItem(kind: .code, label: "Домофон", value: "19#7088"),
+                FactItem(kind: .wifi, label: "Wi-Fi", value: "SecretWifi99"),
+                FactItem(kind: .note, label: "Заметка", value: "Вход со двора, тел 9161234567"),
+            ],
+            createdAt: Date(timeIntervalSince1970: 100),
+            updatedAt: Date(timeIntervalSince1970: 100)
+        )
+        let home = FactCard(
+            title: "Дом Камилы",
+            symbol: "house.fill",
+            items: [FactItem(kind: .text, label: "Ориентир", value: "Синяя дверь")],
+            createdAt: Date(timeIntervalSince1970: 200),
+            updatedAt: Date(timeIntervalSince1970: 200)
+        )
+        facts.add(speech)
+        facts.add(home)
+
+        let detailed = CloudChatFactTools.index(facts, details: true)
+        XCTAssertTrue(detailed.contains("f1 · Логопед Николая"), detailed)
+        XCTAssertTrue(detailed.contains("f2 · Дом Камилы"), detailed)
+        XCTAssertTrue(detailed.contains("Адрес: Москва, проспект Маршала Жукова, 28"), detailed)
+        XCTAssertTrue(detailed.contains("Ориентир: Синяя дверь"), detailed)
+        XCTAssertTrue(detailed.contains("Заметка: Вход со двора, тел …"), detailed)
+        for secret in ["19#7088", "7088", "SecretWifi99", "9161234567", speech.id.uuidString] {
+            XCTAssertFalse(detailed.contains(secret), "в описи не должно быть \(secret): \(detailed)")
+        }
+
+        let compact = CloudChatFactTools.index(facts)
+        XCTAssertTrue(compact.contains("f1 · Логопед Николая"), compact)
+        XCTAssertFalse(compact.contains("Маршала Жукова"), "короткая опись для iPhone — без значений")
+
+        // Правка карточки обновляет updatedAt, но не меняет её короткий номер
+        speech.items.append(FactItem(kind: .number, label: "Этаж", value: "2"))
+        facts.update(speech)
+        XCTAssertEqual(CloudChatFactTools.encodeID(speech.id, in: facts), "f1")
+
+        var shown: [ChatCard] = []
+        let result = CloudChatFactTools.run("show_fact_card", arguments: ["id": "f1", "labels": ["Домофон"]], facts: facts, cards: &shown)
+        XCTAssertEqual(result["shown"]?.string, "f1")
+        let intercomID = try XCTUnwrap(speech.items.first { $0.label == "Домофон" }?.id)
+        XCTAssertEqual(shown, [.fact(id: speech.id, items: [intercomID])])
+
+        // Прежний формат с UUID тоже понимается
+        XCTAssertEqual(CloudChatFactTools.decodeID("f\(speech.id.uuidString)", in: facts), speech.id)
+        let step = await CloudChatSteps.step(for: "show_fact_card", arguments: ["id": "f1"], search: search, facts: facts)
+        XCTAssertEqual(step?.1, "Открываю карточку «Логопед Николая»")
+    }
 }

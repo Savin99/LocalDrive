@@ -157,6 +157,9 @@ enum CloudChatEvent: Sendable, Equatable {
     /// Ответ интерфейсом: очередной кусок JSON как есть, без маски — маска
     /// ложится на разобранные значения (`GenUIStreamFeed`)
     case answerDelta(String)
+    /// Повторный раунд после пустого ответа или исчерпания шагов: поток
+    /// интерфейса и накопленный текст прошлого раунда сбрасываются
+    case resetAnswer
 }
 
 struct CloudChatReply: Sendable, Equatable {
@@ -253,38 +256,60 @@ final class CloudChatEngine {
 
     /// Инструкция этого разговора частями — та же, что уйдёт с вопросом
     private func systemParts(genUI: Bool) -> CloudChatSystem {
-        Self.parts(documentIndex, genUI: genUI, owner: ownerName, facts: CloudChatFactTools.index(facts), folders: folderIndex)
+        Self.parts(documentIndex, genUI: genUI, owner: ownerName, facts: CloudChatFactTools.index(facts, details: true), folders: folderIndex)
+    }
+
+    /// Переносит отказы сервера от необязательных полей в настройки сессии,
+    /// не трогая флаги, которые были выключены снаружи (например, fastTier)
+    private func apply(_ relaxed: CloudChatOptions, from current: CloudChatOptions) {
+        if current.summaries, !relaxed.summaries { options.summaries = false }
+        if current.fastTier, !relaxed.fastTier { options.fastTier = false }
+        if current.configurationUpdates, !relaxed.configurationUpdates { options.configurationUpdates = false }
+        if current.cacheBreakpoint, !relaxed.cacheBreakpoint { options.cacheBreakpoint = false }
+        if current.genUI, !relaxed.genUI { options.genUI = false }
     }
 
     /// Прогреть кэш префикса: правила, опись, инструменты и схема ответа
     /// уходят заранее, без вопроса, и первый вопрос не ждёт их разбора.
     /// Запись живёт 12 часов: прогрев повторяется, только когда префикс
     /// изменился (документы, владелец, модель) или срок подходит к концу.
-    /// Ошибка прогрева ничего не ломает — вопрос просто прочтёт префикс сам
+    /// Если сервер отклонил необязательное поле (итоги рассуждения, fast),
+    /// прогрев повторяется без него и запоминает отказ на сессию — первый
+    /// вопрос не платит лишним кругом 400
     func prewarm(now: Date = Date()) async {
         prepareHistory()
         var state = dialectState
         if state.baseLevel == nil, configuration.provider == .openAI { state.baseLevel = OpenAIChatDialect.baseLevel }
-        var options = options
-        options.fastTier = options.fastTier && fastTier
-        let genUI = genUI && options.genUI
-        let system = systemParts(genUI: genUI)
-        // Отметка — по всему, что входит в кэшируемый префикс, кроме даты: она
-        // идёт после отметок кэша, и её смена прогрева не требует
-        var undated = system
-        undated.today = ""
-        guard let request = dialect.prewarmRequest(system: system, configuration: configuration, state: state, options: options, genUI: genUI),
-              let body = dialect.prewarmRequest(system: undated, configuration: configuration, state: state, options: options, genUI: genUI)?.httpBody
-        else { return }
-        let key = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
-        if let warm = Self.warmPrefix, warm.key == key, warm.until > now { return }
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
-            if let usage = CloudJSON.parse(data)?["usage"] { self.usage += CloudChatUsage(usage: usage) }
-            Self.warmPrefix = (key, now.addingTimeInterval(Self.warmLifetime))
-        } catch {
-            return
+        while true {
+            var current = options
+            current.fastTier = current.fastTier && fastTier
+            let usesGenUI = genUI && current.genUI
+            let system = systemParts(genUI: usesGenUI)
+            // Отметка — по всему, что входит в кэшируемый префикс, кроме даты: она
+            // идёт после отметок кэша, и её смена прогрева не требует
+            var undated = system
+            undated.today = ""
+            guard let request = dialect.prewarmRequest(system: system, configuration: configuration, state: state, options: current, genUI: usesGenUI),
+                  let body = dialect.prewarmRequest(system: undated, configuration: configuration, state: state, options: current, genUI: usesGenUI)?.httpBody
+            else { return }
+            let key = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+            if let warm = Self.warmPrefix, warm.key == key, warm.until > now { return }
+            do {
+                let (data, response) = try await session.data(for: request)
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if status == 200 {
+                    if let usage = CloudJSON.parse(data)?["usage"] { self.usage += CloudChatUsage(usage: usage) }
+                    Self.warmPrefix = (key, now.addingTimeInterval(Self.warmLifetime))
+                    return
+                }
+                if let relaxed = dialect.relaxing(current, status: status, body: data) {
+                    apply(relaxed, from: current)
+                    continue
+                }
+                return
+            } catch {
+                return
+            }
         }
     }
 
@@ -422,7 +447,7 @@ final class CloudChatEngine {
                 } else {
                     visible()
                     round.answer += delta.text
-                    onEvent(genUI ? .answerDelta(delta.text) : .text(self.tools.mask(round.answer)))
+                    onEvent((genUI && self.options.genUI) ? .answerDelta(delta.text) : .text(self.tools.mask(round.answer)))
                 }
             } onCall: { call in
                 // Карточки — как только вызов пришёл целиком, до текста ответа
@@ -442,6 +467,9 @@ final class CloudChatEngine {
             // ответ в 1 из 5. Ответ по-русски без единой буквы кириллицы — пустой
             if turn.calls.isEmpty, !nudged, round.cards.isEmpty, Self.isEmptyAnswer(round.answer, genUI: genUI && self.options.genUI) {
                 nudged = true
+                // Прежний пустой JSON уже закрыл парсер интерфейса (.done):
+                // сбрасываем его, иначе повторный ответ будет молча отброшен
+                onEvent(.resetAnswer)
                 items = dialect.appending(user: Self.emptyAnswerNudge, attachments: [], level: level, to: items, state: &state)
                 continue
             }
@@ -469,7 +497,11 @@ final class CloudChatEngine {
             // в истории, следующий вопрос продолжит этот ход
             if endsTurn { return finish(round.answer) }
         }
-        return finish(round.answer.isEmpty ? "Не успел собрать ответ — уточните вопрос." : round.answer)
+        if round.answer.isEmpty {
+            onEvent(.resetAnswer)
+            return finish("Не успел собрать ответ — уточните вопрос.")
+        }
+        return finish(round.answer)
     }
 
     /// Шаг на экране — до того, как инструмент начнёт работу
@@ -490,7 +522,7 @@ final class CloudChatEngine {
         if shown { onEvent(.cards(Array(cards[before...]))) }
     }
 
-    /// `facts` — опись «Карточек» без значений (CloudChatFactTools.index)
+    /// `facts` — опись «Карточек» (CloudChatFactTools.index)
     static func system(_ index: String, genUI: Bool = false, owner: String? = nil, facts: String = "", today: Date = Date()) -> String {
         parts(index, genUI: genUI, owner: owner, facts: facts, today: today).text
     }
@@ -540,6 +572,8 @@ final class CloudChatEngine {
                 throw CancellationError()
             } catch let error as URLError where error.code == .cancelled {
                 throw CancellationError()
+            } catch let error as URLError where error.code == .timedOut {
+                throw CloudChatTimeout(seconds: Int(streamRequestTimeout))
             } catch {
                 throw CloudFailure.network
             }
@@ -547,8 +581,10 @@ final class CloudChatEngine {
             guard (200..<300).contains(status) else {
                 var body = Data()
                 for try await byte in bytes { body.append(byte) }
-                if let relaxed = dialect.relaxing(options, status: status, body: body) {
-                    options = relaxed
+                var current = options
+                current.fastTier = current.fastTier && fastTier
+                if let relaxed = dialect.relaxing(current, status: status, body: body) {
+                    apply(relaxed, from: current)
                     continue
                 }
                 throw CloudResponseParser.failure(status: status, data: body) ?? CloudFailure.badResponse
@@ -574,6 +610,8 @@ final class CloudChatEngine {
                 throw CancellationError()
             } catch let error as URLError where error.code == .cancelled {
                 throw CancellationError()
+            } catch let error as URLError where error.code == .timedOut {
+                throw CloudChatTimeout(seconds: Int(streamRequestTimeout))
             } catch {
                 throw CloudFailure.network
             }
@@ -715,10 +753,14 @@ protocol CloudChatDialect {
     func relaxing(_ options: CloudChatOptions, status: Int, body: Data) -> CloudChatOptions?
 }
 
+/// Таймаут HTTP-запроса больше сроков чата (90 с / 180 с для «Подумать»),
+/// чтобы обрыв по сроку контролировал сторож `ChatSession`, а не URLSession
+private let streamRequestTimeout: TimeInterval = 180
+
 private func streamRequest(_ url: String, apiKey: (field: String, value: String), body: Data) -> URLRequest {
     var request = URLRequest(url: URL(string: url) ?? URL(string: "https://invalid.invalid")!)
     request.httpMethod = "POST"
-    request.timeoutInterval = 60
+    request.timeoutInterval = streamRequestTimeout
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue(apiKey.value, forHTTPHeaderField: apiKey.field)
     request.httpBody = body
@@ -1085,7 +1127,7 @@ struct OpenAIChatDialect: CloudChatDialect {
             relaxed.fastTier = false
         } else if options.configurationUpdates, message.contains("configuration_update") {
             relaxed.configurationUpdates = false
-        } else if options.cacheBreakpoint, message.contains("prompt_cache") || message.contains("breakpoint") {
+        } else if options.cacheBreakpoint, message.contains("prompt_cache") || message.contains("breakpoint") || message.contains("prewarm") {
             relaxed.cacheBreakpoint = false
         } else if options.genUI, message.contains("response_format") || message.contains("json_schema") {
             relaxed.genUI = false

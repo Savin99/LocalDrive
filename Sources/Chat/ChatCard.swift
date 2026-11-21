@@ -54,15 +54,18 @@ struct ClarifyOption: Hashable, Codable, Sendable {
     let title: String
     let query: String
     var documentID: Int64? = nil
+    /// Искать локально на iPhone, не обращаясь к облаку (кнопка «Найти на iPhone» при сбое сети)
+    var localOnly: Bool = false
 
     private enum CodingKeys: String, CodingKey {
-        case title, query, documentId
+        case title, query, documentId, localOnly
     }
 
-    init(title: String, query: String, documentID: Int64? = nil) {
+    init(title: String, query: String, documentID: Int64? = nil, localOnly: Bool = false) {
         self.title = title
         self.query = query
         self.documentID = documentID
+        self.localOnly = localOnly
     }
 
     init(from decoder: Decoder) throws {
@@ -70,6 +73,7 @@ struct ClarifyOption: Hashable, Codable, Sendable {
         title = try container.decode(String.self, forKey: .title)
         query = try container.decode(String.self, forKey: .query)
         documentID = try container.decodeIfPresent(String.self, forKey: .documentId).flatMap(ChatCard.decodeID)
+        localOnly = try container.decodeIfPresent(Bool.self, forKey: .localOnly) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -77,6 +81,7 @@ struct ClarifyOption: Hashable, Codable, Sendable {
         try container.encode(title, forKey: .title)
         try container.encode(query, forKey: .query)
         try container.encodeIfPresent(documentID.map(ChatCard.encodeID), forKey: .documentId)
+        if localOnly { try container.encode(true, forKey: .localOnly) }
     }
 }
 

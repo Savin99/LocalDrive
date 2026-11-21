@@ -170,6 +170,44 @@ final class GenUIChatTests: XCTestCase {
         XCTAssertNil(message.notice)
     }
 
+    /// Модель вернула пустой JSON → движок переспрашивает → парсер интерфейса
+    /// сбрасывается (`.resetAnswer`), иначе второй JSON молча отбрасывался в `.done`
+    func testEmptyInterfaceAnswerRetryResetsParserAndShowsCard() async throws {
+        let (chat, search) = session()
+        let id = try await indexPassport(search)
+        let empty = #"{"version":1,"mode":"text","text":"","state":[],"computed":[],"blocks":[]}"#
+        let card = #"{"version":1,"mode":"ui","text":"","state":[],"computed":[],"blocks":[{"id":"card","type":"app_card","visible_if":null,"card":{"kind":"fields","document_id":"d\#(id)","document_ids":null,"keys":["full_name"],"page":null}}]}"#
+        StubURLProtocol.reset([Interface.answer(empty), Interface.answer(card)])
+
+        chat.send("мой паспорт")
+        try await finish(chat)
+        XCTAssertEqual(StubURLProtocol.requests.count, 2, "после пустого JSON — повторный запрос")
+        let message = try XCTUnwrap(chat.messages.last)
+        let genui = try XCTUnwrap(message.genui, "повторный ответ не потерялся")
+        XCTAssertEqual(genui.phase, .finished)
+        XCTAssertEqual(genui.blocks.map(\.id), ["card"])
+        XCTAssertNotEqual(message.text, "Не нашёл, что ответить — уточните вопрос.")
+    }
+
+    /// Сервер отклонил JSON-схему интерфейса → повтор обычным текстом не
+    /// затирается пустой строкой в `ChatSession`
+    func testSchemaRejectionFallsBackToPlainText() async throws {
+        let (chat, _) = session()
+        let rejected = StubURLProtocol.Reply(
+            status: 400,
+            body: (["error": ["message": "Invalid schema for response_format 'genui_answer'.", "type": "invalid_request_error", "code": "invalid_json_schema"]] as CloudJSON).data
+        )
+        StubURLProtocol.reset([rejected, Interface.answer("Вот ваш ответ текстом.")])
+
+        chat.send("привет")
+        try await finish(chat)
+        XCTAssertEqual(StubURLProtocol.requests.count, 2)
+        XCTAssertNil(try body(1)["text"]?["format"], "повтор — без строгой схемы")
+        let message = try XCTUnwrap(chat.messages.last)
+        XCTAssertNil(message.genui)
+        XCTAssertEqual(message.text, "Вот ваш ответ текстом.")
+    }
+
     func testPerformerActions() async throws {
         let (chat, search) = session()
         let id = try await indexPassport(search)

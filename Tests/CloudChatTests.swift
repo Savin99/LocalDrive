@@ -336,9 +336,11 @@ final class CloudChatTests: XCTestCase {
     }
 
     /// Чат только облачный (владелец 19.11.2026: «почему ответил сам, если всё
-    /// только облако»): правила ответ облака не подменяют — причина и «Повторить»
+    /// только облако»): правила ответ облака не подменяют — причина, «Повторить»
+    /// и явная кнопка «Найти на iPhone», если VPN пропал в дороге
     func testCloudFailureShowsCauseAndRetry() async throws {
-        let (session, _) = cloudSession()
+        let (session, local) = cloudSession()
+        let id = try await indexPassport(in: local)
         StubURLProtocol.reset([OpenAI.error(403, "Country, region, or territory not supported", code: "unsupported_country_region_territory")])
         session.send("мой паспорт")
         try await finish(session)
@@ -346,9 +348,21 @@ final class CloudChatTests: XCTestCase {
         XCTAssertEqual(answer.notice, "Облако недоступно — проверьте VPN", "причина, а не общее «недоступно»")
         XCTAssertTrue(answer.text.isEmpty, "правила не отвечают вместо облака")
         guard case .clarify(_, let options)? = answer.cards.first?.card else { return XCTFail("нет «Повторить»: \(answer.cards)") }
-        XCTAssertEqual(options.map(\.title), ["Повторить"])
-        XCTAssertEqual(options.first?.query, "мой паспорт", "повтор — тот же вопрос")
+        XCTAssertEqual(options.map(\.title), ["Повторить", "Найти на iPhone"])
+        XCTAssertEqual(options[0].query, "мой паспорт", "повтор — тот же вопрос")
+        XCTAssertFalse(options[0].localOnly)
+        XCTAssertEqual(options[1].query, "мой паспорт")
+        XCTAssertTrue(options[1].localOnly)
         XCTAssertEqual(StubURLProtocol.requests.count, 1)
+
+        // Явное нажатие «Найти на iPhone» отдаёт паспорт из базы без сети
+        session.send(options[1].query, localOnly: options[1].localOnly)
+        try await finish(session)
+        XCTAssertEqual(StubURLProtocol.requests.count, 1, "локальный поиск не ходит в облако")
+        let offline = try XCTUnwrap(session.messages.last)
+        XCTAssertTrue(offline.cards.contains { card in
+            if case .fields(let document, _) = card.card { document == id } else { false }
+        }, "нашёл паспорт локально: \(offline.cards)")
     }
 
     // MARK: - OpenAI
@@ -536,6 +550,31 @@ final class CloudChatTests: XCTestCase {
         chat.documentIndex += "\nd2 · passport_intl · Загранпаспорт · Савин И. А. · Паспорта"
         await chat.prewarm()
         XCTAssertEqual(StubURLProtocol.requests.count, 3, "опись изменилась — прогрев заново")
+    }
+
+    /// Прогрев сам откатывает необязательные поля (summary без верификации
+    /// организации) и запоминает это на сессию — первый вопрос идёт без 400
+    func testOpenAIPrewarmRelaxesUnsupportedOptionsForFirstQuestion() async throws {
+        UserDefaults.standard.removeObject(forKey: "chat.warmPrefix.key")
+        UserDefaults.standard.removeObject(forKey: "chat.warmPrefix.until")
+        let warmed: CloudJSON = ["id": "resp_w", "status": "completed", "output": []]
+        StubURLProtocol.reset([
+            OpenAI.error(400, "Your organization must be verified to generate reasoning summaries.", code: "unsupported_value", param: "reasoning.summary"),
+            StubURLProtocol.Reply(status: 200, body: warmed.data),
+            OpenAI.text("Привет!"),
+        ])
+        let chat = engine(.luna)
+        chat.genUI = true
+        chat.documentIndex = "d1 · passport_ru · Паспорт · Савин И. А. · Паспорта"
+        await chat.prewarm()
+        XCTAssertEqual(StubURLProtocol.requests.count, 2, "прогрев повторил без summary")
+        XCTAssertEqual(try body(0)["reasoning"]?["summary"]?.string, "auto")
+        XCTAssertNil(try body(1)["reasoning"]?["summary"])
+
+        let reply = try await chat.respond(to: "привет")
+        XCTAssertEqual(reply.text, "Привет!")
+        XCTAssertEqual(StubURLProtocol.requests.count, 3, "первый вопрос прошёл с первой попытки, без 400")
+        XCTAssertNil(try body(2)["reasoning"]?["summary"])
     }
 
     /// Ответ одной карточкой интерфейса — ответ, а не пустота: в его JSON нет

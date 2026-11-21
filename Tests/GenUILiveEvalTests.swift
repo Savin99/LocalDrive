@@ -109,7 +109,7 @@ final class GenUILiveEvalTests: XCTestCase {
                         case .answerDelta(let delta):
                             if stream.firstToken == nil { stream.firstToken = Date().timeIntervalSince(started) }
                             stream.feedDelta(delta)
-                        case .tool:
+                        case .tool, .resetAnswer:
                             stream.newRound = true
                         default:
                             break
@@ -447,6 +447,7 @@ final class GenUILiveEvalTests: XCTestCase {
                     reply = try await engine.respond(to: question) { event in
                         if case .answerDelta(let delta) = event { stream.feedDelta(delta) }
                         if case .tool = event { stream.newRound = true }
+                        if case .resetAnswer = event { stream.newRound = true }
                     }
                 } catch {
                     record(step, false, "\(error)", started)

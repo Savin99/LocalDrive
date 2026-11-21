@@ -262,8 +262,9 @@ final class ChatSession {
     }
 
     /// `documentID` — чип уточнения указал документ, его и показываем.
-    /// `attachments` — вложения из «+»: их кадры видит облачная модель
-    func send(_ text: String, documentID: Int64? = nil, attachments: [CloudChatAttachment] = []) {
+    /// `attachments` — вложения из «+»: их кадры видит облачная модель.
+    /// `localOnly` — человек сам нажал «Найти на iPhone» при сбое облака: ищем сразу в базе
+    func send(_ text: String, documentID: Int64? = nil, attachments: [CloudChatAttachment] = [], localOnly: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty, !isAnswering else { return }
         let context = contextDocumentIDs()
@@ -272,12 +273,12 @@ final class ChatSession {
         messages.append(Message(role: .user, text: trimmed))
         let pending = Message(role: .assistant, text: "", isPending: true)
         messages.append(pending)
-        // Чип указал документ — отвечают правила: выбор уже сделан
-        let model = documentID == nil ? agentModel() : nil
+        // Чип указал документ или выбран локальный поиск — отвечают правила сразу
+        let model = (!localOnly && documentID == nil) ? agentModel() : nil
         // Облако — если выбрано на поле ввода, включено и с ключом
         let cloud = search.cloud
         // Выключенный облачный чат — не сбой: чип и так показывает «iPhone»
-        let wantsCloud = documentID == nil && cloud.chatAvailable && cloud.chatModel != .local
+        let wantsCloud = !localOnly && documentID == nil && cloud.chatAvailable && cloud.chatModel != .local
         let configuration = wantsCloud ? cloud.chatConfiguration : nil
         // Ответ на вопрос облака или агента: правила его не перехватывают
         let answersAgent = agentAskedQuestion && documentID == nil && ChatIntent(trimmed).isBareReply
@@ -608,13 +609,18 @@ final class ChatSession {
         }
     }
 
-    /// Облако не ответило: причина и кнопка «Повторить» — тот же вопрос заново
+    /// Облако не ответило: причина, кнопка «Повторить» и явный запасной поиск
+    /// на iPhone — правила сами не подменяют облако, но в лифте или без VPN
+    /// паспорт и карточки всё равно можно достать одним касанием
     private func showCloudFailure(_ notice: String, question: String, pending: UUID) {
         guard let index = messages.firstIndex(where: { $0.id == pending }) else { return }
-        let retry = [ClarifyOption(title: "Повторить", query: question)]
+        let options = [
+            ClarifyOption(title: "Повторить", query: question),
+            ClarifyOption(title: "Найти на iPhone", query: question, localOnly: true),
+        ]
         messages[index].text = ""
         messages[index].notice = notice
-        messages[index].cards = [ResolvedCard(card: .clarify(question: nil, options: retry), content: .clarify(question: nil, options: retry))]
+        messages[index].cards = [ResolvedCard(card: .clarify(question: nil, options: options), content: .clarify(question: nil, options: options))]
         messages[index].thoughts = ""
         messages[index].genui = nil
         messages[index].isPending = false
@@ -988,7 +994,7 @@ final class ChatSession {
             let model = feedModel.flatMap { $0.blocks.isEmpty && $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
             messages[index].genui = model
             if model == nil { messages[index].genuiPerformer = nil }
-            let answer = model?.text ?? (interface.isGenUI ? "" : reply.text)
+            let answer = model?.text ?? (interface.feed?.hasContent == true ? "" : reply.text)
             messages[index].text = answer.isEmpty && cards.isEmpty && model == nil ? "Не нашёл, что ответить — уточните вопрос." : answer
             messages[index].cards = cards
             messages[index].thoughts = reply.thoughts
@@ -1135,6 +1141,12 @@ final class ChatSession {
                         let feed = self.interfaceFeed(interface, engine: engine, pending: pending, index: index)
                         feed.feed(delta)
                         self.messages[index].text = feed.model.text
+                    case .resetAnswer:
+                        interface.feed = nil
+                        interface.newRound = true
+                        self.messages[index].text = ""
+                        self.messages[index].genui = nil
+                        self.messages[index].genuiPerformer = nil
                     case .tool: interface.newRound = true
                     case .step(let kind, let text): self.stepSink(for: pending)(kind, text)
                     case .cards(let cards):

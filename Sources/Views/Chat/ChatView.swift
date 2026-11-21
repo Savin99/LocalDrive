@@ -370,14 +370,14 @@ struct ChatView: View {
     /// `text == nil` — отправить поле ввода и очистить его; иначе это чип,
     /// и начатый в поле вопрос остаётся на месте. Вложения уходят только с
     /// полем ввода, не с чипом
-    private func send(_ text: String? = nil, documentID: Int64? = nil) {
+    private func send(_ text: String? = nil, documentID: Int64? = nil, localOnly: Bool = false) {
         let message = (text ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !session.isAnswering else { return }
-        if text == nil, documentID == nil, !session.inbox.draft.isEmpty {
+        if text == nil, documentID == nil, !localOnly, !session.inbox.draft.isEmpty {
             session.send(message, attaching: session.inbox.takeDraft())
         } else {
             guard !message.isEmpty else { return }
-            session.send(message, documentID: documentID)
+            session.send(message, documentID: documentID, localOnly: localOnly)
         }
         if text == nil { draft = "" }
         // Ответ — это карточки, по которым тапают: клавиатура закрывала бы их
@@ -419,7 +419,7 @@ struct ChatView: View {
                 opened = OpenedFile(file: file, files: list, page: page)
             },
             send: { text in send(text) },
-            choose: { option in send(option.query, documentID: option.documentID) },
+            choose: { option in send(option.query, documentID: option.documentID, localOnly: option.localOnly) },
             copy: { value in copy(value) },
             setRevealed: { revealed in await setRevealed(revealed) },
             edit: { document, field in
