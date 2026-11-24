@@ -136,6 +136,7 @@ struct ChatView: View {
             session.useGenUIHooks(genuiHooks)
             // Кэш облака — заранее: первый вопрос не ждёт разбора инструкции и описи
             session.prewarmCloud()
+            AppTelemetry.live?.recordScreen("Chat")
             #if DEBUG
             // Скриншоты: «-OpenSettings» — сразу настройки
             if ProcessInfo.processInfo.arguments.contains("-OpenSettings") { showsSettings = true }
@@ -288,9 +289,8 @@ struct ChatView: View {
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 6) {
             attachButton
-            // С вложением подсказка говорит, что будет: «↑» — предложу папку,
-            // «положи в Семью» — сразу туда
-            TextField(session.inbox.draft.isEmpty ? "Спросить или найти" : "«Положи в …» или ↑ — предложу папку", text: $draft, axis: .vertical)
+            // С вложением не навязываем раскладку по папкам — человек может попросить что угодно
+            TextField(session.inbox.draft.isEmpty ? "Спросить или найти" : "Что сделать с вложением?", text: $draft, axis: .vertical)
                 .font(.body)
                 .foregroundStyle(Theme.ink)
                 .lineLimit(1...5)
@@ -433,7 +433,8 @@ struct ChatView: View {
                 await search.setManualField(documentID: document.id, key: key, value: value)
                 await session.refresh(documentID: document.id)
             },
-            remind: { document, validity in await remind(document, validity) }
+            remind: { document, validity in await remind(document, validity) },
+            reportDecision: { description, kind in session.recordProposalDecision(description, kind: kind) }
         )
     }
 

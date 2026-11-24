@@ -24,6 +24,8 @@ struct ChatActions {
     var fixField: @MainActor (_ document: ChatDocument, _ key: String, _ value: String) async -> Void = { _, _, _ in }
     /// Поставить напоминание о сроке; вернуть текст подтверждения или ошибки
     var remind: @MainActor (_ document: ChatDocument, _ validity: DocumentValidity) async -> String = { _, _ in "" }
+    /// Сообщить сессии решение пользователя по карточке предложения («Принять» / «Отклонить» / «Сохранить»)
+    var reportDecision: @MainActor (_ description: String, _ kind: String) -> Void = { _, _ in }
 }
 
 extension EnvironmentValues {

@@ -8,6 +8,7 @@ struct FactProposalCardView: View {
     let draft: FactCard
 
     @Environment(FactStore.self) private var facts
+    @Environment(\.chatActions) private var actions
     @State private var editing = false
     @State private var edited: FactCard?
     @State private var saveTick = 0
@@ -32,6 +33,7 @@ struct FactProposalCardView: View {
                 } else {
                     Button {
                         if existing == nil { facts.add(current) } else { facts.update(current) }
+                        actions.reportDecision("Действие пользователя: сохранил карточку «\(current.title)»", "fact_saved")
                         saveTick &+= 1
                     } label: {
                         Label(existing == nil ? "Сохранить" : "Обновить", systemImage: "square.and.arrow.down")

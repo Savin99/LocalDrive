@@ -287,23 +287,21 @@ final class ChatSession {
         cloudTask = Task {
             let steps = self.stepSink(for: pending.id)
             defer { self.finishSteps(of: pending.id) }
-            // Кто владелец и чей «мой паспорт» — правила, без облака: модель
-            // угадывала чужой паспорт (жалоба владельца 13.10.2026)
+            // Кто владелец и чей «мой паспорт» — правила, когда владелец ещё не задан
+            // или человек представляется («я Илья»)
             if documentID == nil, attachments.isEmpty, let local = await self.ownerAnswer(trimmed, context: context) {
                 await self.show(local, pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
-            // «Положи его в Семью», «перенеси паспорт Ольги в Документы» —
-            // предложение сразу, без облака: куда класть, человек уже сказал
-            if documentID == nil, attachments.isEmpty, let command = ChatFileCommand(trimmed),
-               let reply = await self.fileCommandReply(command, context: context, delegates: configuration != nil || model != nil, steps: steps) {
+            // В офлайн-режиме (без облака) работают локальные правила для команд,
+            // карточек, правок полей и вопросов по вложениям. С облаком всё это
+            // решает сам агент, видя полный контекст и историю переписки.
+            if configuration == nil, documentID == nil, attachments.isEmpty, let command = ChatFileCommand(trimmed),
+               let reply = await self.fileCommandReply(command, context: context, delegates: model != nil, steps: steps) {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
-            // «Запомни: у Камилы домофон 45, этаж 3» — черновик карточки. С
-            // облаком разбирает модель: она свободнее раскладывает поля и
-            // подбирает значки; без облака — разбор на iPhone
-            if documentID == nil, attachments.isEmpty, configuration == nil, facts != nil,
+            if configuration == nil, documentID == nil, attachments.isEmpty, facts != nil,
                FactDraftParser.request(in: trimmed) != nil {
                 steps(.understand, "Понял: запомнить")
                 let reply: ChatReply
@@ -318,16 +316,12 @@ final class ChatSession {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
-            // «В фамилии ошибка», «исправь дату рождения на 12.05.1985» —
-            // карточка «было → станет» с «Принять» и «Отклонить»
-            if documentID == nil, attachments.isEmpty,
-               let reply = await self.fieldFixReply(trimmed, context: context, delegates: configuration != nil || model != nil, steps: steps) {
+            if configuration == nil, documentID == nil, attachments.isEmpty,
+               let reply = await self.fieldFixReply(trimmed, context: context, delegates: model != nil, steps: steps) {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
-            // «Какой день рождения у этого человека?» сразу после вложения:
-            // файла ещё нет в базе, но его разбор знает поля
-            if documentID == nil, attachments.isEmpty, let reply = await self.attachmentAnswer(trimmed, steps: steps) {
+            if configuration == nil, documentID == nil, attachments.isEmpty, let reply = await self.attachmentAnswer(trimmed, steps: steps) {
                 await self.show(OwnerAnswer(reply: reply), pending: pending.id, question: trimmed, configuration: configuration)
                 return
             }
@@ -672,8 +666,8 @@ final class ChatSession {
                     self.attachmentReadings[item.id] = await FilePlacementAdvisor.read(item)
                 }
             }
-            // «Положи в Паспорта» вместе с файлом — куда, уже сказано
-            if let command = ChatFileCommand(trimmed), let store {
+            // Без облака «Положи в Паспорта» вместе с файлом — сразу предложение
+            if configuration == nil, let command = ChatFileCommand(trimmed), let store {
                 let target = command.target(in: store)
                 steps(.folders, Self.folderStep(command, target: target, store: store))
                 let proposal = FileProposal(
@@ -687,22 +681,32 @@ final class ChatSession {
             var notice: String?
             if let configuration {
                 steps(.think, "Показываю облаку · \(configuration.model.chip)")
-                var imaged: [CloudChatAttachment] = []
-                var named: [ChatAttachment] = []
+                var prepared: [CloudChatAttachment] = []
+                var unsupported: [ChatAttachment] = []
                 for item in items {
-                    if let jpeg = await inbox.modelImage(item.id) {
-                        imaged.append(CloudChatAttachment(id: item.id, name: item.name, jpeg: jpeg))
+                    if let loaded = await inbox.modelPages(item.id), (!loaded.images.isEmpty || loaded.text != nil) {
+                        prepared.append(CloudChatAttachment(
+                            id: item.id,
+                            name: item.name,
+                            pages: loaded.images.map(\.jpeg),
+                            totalPages: loaded.totalPages,
+                            extractedText: loaded.text
+                        ))
                     } else {
-                        named.append(item)
+                        unsupported.append(item)
                     }
                 }
-                var prompt = trimmed.isEmpty ? "Куда положить эти файлы?" : trimmed
-                if !named.isEmpty {
-                    prompt += "\n\nВложения без кадра: " + named.map { "\($0.id) — «\($0.name)»" }.joined(separator: ", ")
+                // Не подставляем навязанный вопрос («Куда положить эти файлы?»):
+                // агент сам видит контекст диалога и присланные файлы.
+                var prompt = trimmed
+                if !unsupported.isEmpty {
+                    let note = "Вложения без предпросмотра: " + unsupported.map { "\($0.id) — «\($0.name)»" }.joined(separator: ", ")
+                    prompt = prompt.isEmpty ? note : prompt + "\n\n" + note
                 }
-                let result = await answerInCloud(prompt, attachments: imaged, configuration: configuration, pending: pending.id)
+                let result = await answerInCloud(prompt, attachments: prepared, configuration: configuration, pending: pending.id)
                 if result.done { return }
-                notice = result.notice
+                self.showCloudFailure(result.notice ?? "Облако недоступно", question: trimmed, pending: pending.id)
+                return
             } else if wantsCloud {
                 notice = Self.cloudNotice
             }
@@ -995,9 +999,40 @@ final class ChatSession {
             messages[index].thinkingSeconds = reply.thinkingSeconds
             messages[index].isPending = false
             agentAskedQuestion = Self.asksQuestion(answer)
+            if let issues = model?.issues, !issues.isEmpty {
+                AppTelemetry.live?.recordError(
+                    category: "genui",
+                    code: "validation_issues",
+                    message: "Ошибки разбора GenUI (\(issues.count))",
+                    level: .warn,
+                    meta: ["count": "\(issues.count)", "first": issues[0].description],
+                    scheduleUrgentFlush: false
+                )
+            }
             return (true, nil)
         } catch {
             guard let index = messages.firstIndex(where: { $0.id == pending }) else { return (true, nil) }
+            if !stopRequested {
+                let code: String
+                switch error {
+                case is CloudChatTimeout: code = "timeout"
+                case CloudFailure.regionUnavailable: code = "region_unavailable"
+                case CloudFailure.network: code = "network"
+                case CloudFailure.keyRejected: code = "key_rejected"
+                case CloudFailure.quotaExceeded: code = "quota_exceeded"
+                case CloudFailure.overloaded: code = "overloaded"
+                case CloudFailure.modelNotFound: code = "model_not_found"
+                case CloudFailure.rejected: code = "rejected"
+                default: code = "bad_response"
+                }
+                AppTelemetry.live?.recordError(
+                    category: "cloud-chat",
+                    code: code,
+                    message: Self.notice(for: error),
+                    signature: "cloud-chat:\(code)",
+                    meta: ["provider": configuration.provider.rawValue, "model": configuration.model.rawValue]
+                )
+            }
             let partial = messages[index].text
             let interfaceShown = interface.feed?.hasContent == true && !(interface.feed?.model.blocks.isEmpty ?? true)
             let somethingShown = !partial.isEmpty || !messages[index].cards.isEmpty || interfaceShown
@@ -1086,13 +1121,21 @@ final class ChatSession {
         }
     }
 
+    /// Решение пользователя по карточке предложения («Принять» / «Отклонить» / «Сохранить»):
+    /// агент видит его в следующем сообщении и не повторяет отклонённые действия.
+    func recordProposalDecision(_ description: String, kind: String) {
+        cloudEngine?.recordDecision(description)
+        AppTelemetry.live?.recordAction("chat-proposal", code: kind, message: "Решение по карточке: \(kind)")
+    }
+
     /// Движок облака: один на сессию, с её перепиской
     private func engine(for configuration: CloudChatEngine.Configuration) -> CloudChatEngine {
         if let cloudEngine {
             cloudEngine.configuration = configuration
+            cloudEngine.inbox = inbox
             return cloudEngine
         }
-        let engine = CloudChatEngine(configuration: configuration, search: search, proposals: proposals, session: cloudSession)
+        let engine = CloudChatEngine(configuration: configuration, search: search, proposals: proposals, inbox: inbox, session: cloudSession)
         engine.facts = facts
         cloudEngine = engine
         return engine

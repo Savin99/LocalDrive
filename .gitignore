@@ -28,6 +28,7 @@ __pycache__/
 .venv/
 .ruff_cache/
 
-# Локальный Team ID для подписи
+# Локальный Team ID и секреты телеметрии
 Support/Signing.local.xcconfig
+Config/Secrets.xcconfig
 .env.local

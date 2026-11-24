@@ -9,6 +9,7 @@ struct LocalDriveApp: App {
     @State private var search: SearchService
     @State private var models = ChatModelStore()
     @State private var chat: ChatSession
+    @State private var telemetry: AppTelemetry
     @Environment(\.scenePhase) private var scenePhase
     /// Оформление из настроек: как в системе, светлое или тёмное
     @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.system.rawValue
@@ -16,6 +17,20 @@ struct LocalDriveApp: App {
     init() {
         let store = VaultStore()
         let search = SearchService(store: store)
+        let telemetry = AppTelemetry()
+        telemetry.setContextProvider { [weak store, weak search] in
+            var ctx: [String: String] = [:]
+            if let store { ctx["folderCount"] = "\(store.folders.count)" }
+            if let cloud = search?.cloud {
+                ctx["cloudProvider"] = cloud.provider.rawValue
+                ctx["cloudChat"] = cloud.chatAvailable ? "true" : "false"
+                ctx["cloudHasKey"] = cloud.hasKey ? "true" : "false"
+            }
+            return ctx
+        }
+        if telemetry.isConfigured {
+            MetricKitObserver.shared.start()
+        }
         _store = State(initialValue: store)
         _facts = State(initialValue: FactStore(rootURL: store.rootURL))
         _backup = State(initialValue: BackupManager(vaultURL: store.rootURL))
@@ -24,6 +39,7 @@ struct LocalDriveApp: App {
         // Владелец 12.10.2026: чат пропадал после каждого выхода — даже чтобы
         // вставить скопированный номер
         _chat = State(initialValue: ChatSession(search: search))
+        _telemetry = State(initialValue: telemetry)
         // Код входа больше не спрашивается — его хеш не нужен. Четыре цифры
         // перебираются мгновенно, а код мог совпадать с другими
         SecretStore.legacyPin.delete()
@@ -39,12 +55,16 @@ struct LocalDriveApp: App {
                 .environment(search)
                 .environment(models)
                 .environment(chat)
+                .environment(telemetry)
                 .tint(Theme.accent)
                 .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
                 #if DEBUG
                 // Демо-хранилище для скриншотов: запуск с -DemoVault
                 .task { DemoVault.seedIfNeeded(store: store, search: search) }
                 #endif
+                .task {
+                    await telemetry.flushIfDue(trigger: .launch)
+                }
                 .onChange(of: scenePhase) { _, newPhase in
                     switch newPhase {
                     case .background:
@@ -58,8 +78,10 @@ struct LocalDriveApp: App {
                         // В фоне iOS отклоняет работу GPU: генерация
                         // останавливается, модель выгружается из памяти
                         models.suspend()
+                        telemetry.flushInBackgroundIfNeeded()
                     case .active:
                         search.resume()
+                        Task { await telemetry.flushIfDue(trigger: .launch) }
                     default:
                         break
                     }

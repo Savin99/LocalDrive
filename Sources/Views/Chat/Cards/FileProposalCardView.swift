@@ -9,6 +9,7 @@ struct FileProposalCardView: View {
 
     @Environment(VaultStore.self) private var store
     @Environment(ChatAttachmentInbox.self) private var inbox: ChatAttachmentInbox?
+    @Environment(\.chatActions) private var actions
     @State private var picking = false
 
     private var ledger: FileProposalLedger { .shared }
@@ -104,7 +105,17 @@ struct FileProposalCardView: View {
             ChatChipFlow(spacing: 8) {
                 Button {
                     let inbox = self.inbox ?? ChatAttachmentInbox.unavailable
-                    Task { await ledger.run(proposal, store: store, inbox: inbox) }
+                    Task {
+                        await ledger.run(proposal, store: store, inbox: inbox)
+                        switch ledger.status(of: proposal.id) {
+                        case .done(let text):
+                            actions.reportDecision("Действие пользователя: принял предложение «\(proposal.summary)» — \(text)", "file_applied")
+                        case .failed(let text):
+                            actions.reportDecision("Действие пользователя: попытка применить «\(proposal.summary)» не удалась — \(text)", "file_failed")
+                        default:
+                            break
+                        }
+                    }
                 } label: {
                     Label("Принять", systemImage: "checkmark")
                         .font(.subheadline.weight(.semibold))
@@ -131,6 +142,7 @@ struct FileProposalCardView: View {
 
                 Button {
                     ledger.cancel(proposal.id)
+                    actions.reportDecision("Действие пользователя: отклонил предложение «\(proposal.summary)» — ничего не изменилось", "file_declined")
                 } label: {
                     Text("Отклонить")
                         .font(.subheadline.weight(.medium))

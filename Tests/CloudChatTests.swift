@@ -179,9 +179,9 @@ final class CloudChatTests: XCTestCase {
         let json = try body(0)
         XCTAssertTrue(json["system_instruction"]?["parts"]?.array?.first?["text"]?.string?.hasPrefix(CloudChatPrompt.system) == true)
         let names = Set(json["tools"]?.array?.first?["functionDeclarations"]?.array?.compactMap { $0["name"]?.string } ?? [])
-        // С 24.10.2026 — и инструменты «Карточек»
+        // Включая инструменты «Карточек» и просмотр вложений чата (view_attachment)
         XCTAssertEqual(names, ["search_documents", "list_documents", "list_folders", "list_files", "get_document",
-                               "view_document", "list_expiring", "show_cards", "propose_field_fix", "propose_file_actions",
+                               "view_document", "view_attachment", "list_expiring", "show_cards", "propose_field_fix", "propose_file_actions",
                                "find_fact_cards", "show_fact_card", "propose_fact_card"])
         let thinking = json["generationConfig"]?["thinkingConfig"]
         XCTAssertEqual(thinking?["includeThoughts"]?.bool, true)
@@ -369,7 +369,7 @@ final class CloudChatTests: XCTestCase {
         XCTAssertEqual(json["stream"]?.bool, true)
         XCTAssertEqual(json["reasoning"]?["effort"]?.string, "low", "уровень запроса постоянный — префикс кэша общий у всех разговоров")
         XCTAssertEqual(json["reasoning"]?["summary"]?.string, "auto")
-        XCTAssertEqual(json["text"]?["verbosity"]?.string, "low")
+        XCTAssertEqual(json["text"]?["verbosity"]?.string, "medium")
         XCTAssertEqual(json["service_tier"]?.string, "fast")
         XCTAssertNil(json["instructions"], "инструкция — сообщением developer: там её можно отметить для кэша")
         let instructions = try XCTUnwrap(self.instructions(json))
@@ -392,7 +392,7 @@ final class CloudChatTests: XCTestCase {
 
         let tools = try XCTUnwrap(json["tools"]?.array)
         XCTAssertEqual(Set(tools.compactMap { $0["name"]?.string }), ["search_documents", "list_documents", "list_folders", "list_files",
-                                                                     "get_document", "view_document", "list_expiring", "show_cards", "propose_field_fix", "propose_file_actions",
+                                                                     "get_document", "view_document", "view_attachment", "list_expiring", "show_cards", "propose_field_fix", "propose_file_actions",
                                                                      "find_fact_cards", "show_fact_card", "propose_fact_card"])
         for tool in tools {
             XCTAssertEqual(tool["type"]?.string, "function")

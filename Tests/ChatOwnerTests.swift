@@ -166,7 +166,7 @@ final class ChatOwnerTests: XCTestCase {
         XCTAssertTrue(CloudChatEngine.system("", owner: "Савин И. А.").contains("Владелец хранилища: Савин И. А."))
         XCTAssertTrue(CloudChatEngine.system("", owner: nil).contains("не угадывай"))
         XCTAssertTrue(CloudChatPrompt.system.contains("серию и номер тоже"), "карточка полей — со всеми полями")
-        XCTAssertTrue(CloudChatGenUI.system.contains("series_number тоже"))
+        XCTAssertTrue(CloudChatGenUI.system.contains("series_number"))
     }
 
     /// Возраст «на сегодня»: без даты модель считала от своего года

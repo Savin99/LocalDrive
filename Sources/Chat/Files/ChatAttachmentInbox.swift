@@ -202,7 +202,24 @@ final class ChatAttachmentInbox {
         remove(id)
     }
 
-    // MARK: - Кадр для модели
+    // MARK: - Кадр и страницы для модели
+
+    struct AttachmentPages: Sendable {
+        let images: [(number: Int, jpeg: Data)]
+        let totalPages: Int
+        let text: String?
+    }
+
+    /// Страницы и текст вложения для модели: фото, до 4 страниц PDF (или указанные `pages`),
+    /// плюс извлечённый текст PDF / текстового файла.
+    func modelPages(_ id: String, pages: [Int]? = nil) async -> AttachmentPages? {
+        guard let item = item(id) else { return nil }
+        let url = item.url
+        let type = item.contentType
+        return await Task.detached(priority: .userInitiated) {
+            Self.loadPages(of: url, type: type, pages: pages)
+        }.value
+    }
 
     /// JPEG не больше 2048 px по длинной стороне: фото или первая страница PDF.
     /// Для остальных типов — nil
@@ -213,6 +230,51 @@ final class ChatAttachmentInbox {
         return await Task.detached(priority: .userInitiated) {
             Self.jpeg(of: url, type: type)
         }.value
+    }
+
+    nonisolated static func loadPages(of url: URL, type: UTType?, pages requested: [Int]? = nil) -> AttachmentPages? {
+        let resolvedType = type ?? UTType(filenameExtension: url.pathExtension.lowercased())
+        guard let resolvedType else { return nil }
+        if resolvedType.conforms(to: .pdf) {
+            guard let document = PDFDocument(url: url) else { return nil }
+            let total = document.pageCount
+            let wanted = Array((requested?.isEmpty == false ? requested! : Array(1...max(1, min(total, CloudChatPages.maxPages))))
+                .filter { (1...max(1, total)).contains($0) }
+                .prefix(CloudChatPages.maxPages))
+            var images: [(Int, Data)] = []
+            var textParts: [String] = []
+            for number in wanted {
+                guard let page = document.page(at: number - 1) else { continue }
+                if let jpeg = renderPDFPage(page).flatMap({ encodeJPEG($0, quality: 0.85) }) {
+                    images.append((number, jpeg))
+                }
+                if let pageText = page.string?.trimmingCharacters(in: .whitespacesAndNewlines), !pageText.isEmpty {
+                    textParts.append(total > 1 ? "[Стр. \(number)]\n\(pageText)" : pageText)
+                }
+            }
+            // Если PDF больше 4 страниц и запросили без явных номеров — доберём текст остальных страниц до лимита
+            if requested == nil, total > CloudChatPages.maxPages {
+                for number in (CloudChatPages.maxPages + 1)...min(total, 10) {
+                    if let pageText = document.page(at: number - 1)?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !pageText.isEmpty {
+                        textParts.append("[Стр. \(number)]\n\(pageText)")
+                    }
+                }
+            }
+            let joined = textParts.joined(separator: "\n\n")
+            let text = joined.isEmpty ? nil : String(joined.prefix(8000))
+            return AttachmentPages(images: images, totalPages: total, text: text)
+        }
+        if resolvedType.conforms(to: .image) {
+            guard let jpeg = downsampled(url).flatMap({ encodeJPEG($0, quality: 0.85) }) else { return nil }
+            return AttachmentPages(images: [(1, jpeg)], totalPages: 1, text: nil)
+        }
+        if resolvedType.conforms(to: .text) || resolvedType.conforms(to: .json) || resolvedType.conforms(to: .sourceCode),
+           let data = try? Data(contentsOf: url),
+           let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty {
+            return AttachmentPages(images: [], totalPages: 1, text: String(raw.prefix(8000)))
+        }
+        return nil
     }
 
     nonisolated static func jpeg(of url: URL, type: UTType?) -> Data? {
@@ -243,6 +305,10 @@ final class ChatAttachmentInbox {
 
     nonisolated private static func firstPage(of url: URL) -> CGImage? {
         guard let page = PDFDocument(url: url)?.page(at: 0) else { return nil }
+        return renderPDFPage(page)
+    }
+
+    nonisolated private static func renderPDFPage(_ page: PDFPage) -> CGImage? {
         let bounds = page.bounds(for: .mediaBox)
         guard bounds.width > 0, bounds.height > 0 else { return nil }
         let rotated = page.rotation % 180 != 0

@@ -8,15 +8,18 @@ import Foundation
 final class CloudChatTools {
     private let search: SearchService
     private let proposals: FileProposalMaker?
+    /// Вложения текущего чата: для инструмента view_attachment
+    var inbox: ChatAttachmentInbox?
     /// «Карточки»: найти, показать, предложить новую (CloudChatFactTools)
     var facts: FactStore?
     /// Номера и коды документов, которые проходили через инструменты: в
     /// ответе модели они закрываются маской, даже если она их угадала
     private var sensitive: Set<String> = []
 
-    init(search: SearchService, proposals: FileProposalMaker?) {
+    init(search: SearchService, proposals: FileProposalMaker?, inbox: ChatAttachmentInbox? = nil) {
         self.search = search
         self.proposals = proposals
+        self.inbox = inbox
     }
 
     func forgetSensitive() {
@@ -35,6 +38,7 @@ final class CloudChatTools {
         case "get_document": return await getDocument(arguments)
         case "list_expiring": return await listExpiring(arguments)
         case "view_document": return await viewDocument(arguments)
+        case "view_attachment": return await viewAttachment(arguments)
         case "show_cards": return await showCards(arguments, cards: &cards)
         case "propose_file_actions": return await proposeFileActions(arguments, cards: &cards)
         case "propose_field_fix": return await proposeFieldFix(arguments, cards: &cards)
@@ -83,8 +87,12 @@ final class CloudChatTools {
         return ["documents": [], "hint": "По тексту ничего не нашлось. Не отвечай «не нашёл»: посмотри страницы вероятного документа через view_document — штампы и отметки бывают только на скане."]
     }
 
-    /// Страницы документа картинками: модель смотрит скан сама
+    /// Страницы документа картинками: модель смотрит скан сама.
+    /// Если передан id вложения чата (`a1`…), прозрачно открывает вложение.
     private func viewDocument(_ arguments: CloudJSON) async -> CloudJSON {
+        if let raw = arguments["id"]?.string, raw.hasPrefix("a"), inbox != nil {
+            return await viewAttachment(arguments)
+        }
         guard let raw = arguments["id"]?.string, let id = ChatCard.decodeID(raw),
               let document = await search.documents(ids: [id]).first,
               let folder = search.searchableFolders.first(where: { $0.id == document.folderID }),
@@ -110,6 +118,42 @@ final class CloudChatTools {
         result["pages_shown"] = .array(loaded.images.map { .number(Double($0.number)) })
         result["note"] = "Страницы — картинками ниже. Номера документа в ответе не пиши."
         result["_images"] = .array(loaded.images.map { .string($0.jpeg.base64EncodedString()) })
+        return .object(result)
+    }
+
+    /// Страницы и текст вложения текущего чата (`a1`, `a2`…): модель может
+    /// пересмотреть присланный файл или полистать следующие страницы PDF.
+    private func viewAttachment(_ arguments: CloudJSON) async -> CloudJSON {
+        guard let inbox else { return ["error": "Вложения чата недоступны"] }
+        guard let id = arguments["id"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else {
+            return ["error": "Укажи id вложения, например a1"]
+        }
+        guard let item = inbox.item(id) else {
+            if let folder = inbox.savedFolders[id] {
+                let name = inbox.names[id] ?? id
+                return ["error": .string("Вложение «\(name)» уже сохранено в папку «\(folder)» — найди его среди документов хранилища.")]
+            }
+            let available = inbox.items.map { "\($0.id) («\($0.name)»)" }.joined(separator: ", ")
+            return ["error": .string(available.isEmpty ? "Вложение \(id) не найдено." : "Вложение \(id) не найдено. Доступные вложения чата: \(available).")]
+        }
+        let pages = arguments["pages"]?.array?.compactMap(\.int)
+        var result: [String: CloudJSON] = [
+            "id": .string(item.id),
+            "name": .string(item.name),
+        ]
+        guard let loaded = await inbox.modelPages(id, pages: pages) else {
+            result["note"] = "Этот формат файла нельзя показать картинкой или прочитать как текст."
+            return .object(result)
+        }
+        result["pages_total"] = .number(Double(loaded.totalPages))
+        if let text = loaded.text, !text.isEmpty {
+            result["text"] = .string(text)
+        }
+        if !loaded.images.isEmpty {
+            result["pages_shown"] = .array(loaded.images.map { .number(Double($0.number)) })
+            result["note"] = "Страницы вложения — картинками ниже."
+            result["_images"] = .array(loaded.images.map { .string($0.jpeg.base64EncodedString()) })
+        }
         return .object(result)
     }
 
@@ -351,14 +395,14 @@ final class CloudChatTools {
             }
         }
         cards.append(.fieldFix(documentID: id, key: key, value: normalized))
-        return ["shown": true, "note": "Карточка показана. Исправит человек кнопкой."]
+        return ["shown": true, "note": "Карточка исправления показана пользователю. Изменение применится, только когда он нажмёт «Принять»."]
     }
 
     private func proposeFileActions(_ arguments: CloudJSON, cards: inout [ChatCard]) async -> CloudJSON {
         guard let proposals else { return ["error": "Действия с файлами пока недоступны в этой сборке"] }
         do {
             cards.append(try proposals(await resolvingDocuments(arguments).data))
-            return ["proposed": true, "note": "Ничего не изменится, пока человек не нажмёт «Принять»"]
+            return ["proposed": true, "note": "Карточка предложения показана пользователю. Ничего не изменится, пока он не нажмёт «Принять». Если есть вопрос по сути или нужно что-то пояснить — напиши ответ пользователю."]
         } catch {
             return ["error": .string("Предложение не собралось: \(error.localizedDescription)")]
         }
@@ -436,20 +480,13 @@ enum CloudSchema {
 }
 
 enum CloudChatPrompt {
-    static let system = """
-    Ты — помощник в LocalDrive, личном хранилище документов на iPhone. Отвечай по-русски, коротко: одна-три фразы.
-    Документы, папки и файлы узнавай только через инструменты. Других папок, кроме тех, что вернёт list_folders, нет — не говори о других.
-    Никогда не пиши в тексте серии, номера и коды документов. Данные документа показывай карточкой show_cards (fields) и включай все поля, которые просят, — серию и номер тоже: карточка сама закроет номер маской.
-    Чтобы посмотреть сам документ — штамп регистрации, отметку о браке, детей, — вызови view_document: страницы придут картинками. Не отвечай «не нашёл», пока не посмотрел вероятный документ.
-    Паспорт РФ хранится разворотами — отдельными документами в одной папке: прописка, брак, дети — на других разворотах (other_pages в get_document, в списке документов — рядом).
-    Если вопрос неоднозначный — например, подходят паспорта разных людей, — покажи карточку clarify с вариантами.
-    Файлы сам не меняешь: чтобы положить вложение, перенести, переименовать файл или создать папку, вызови propose_file_actions — человек подтвердит кнопкой.
-    Человек говорит, что поле распознано с ошибкой («в фамилии ошибка», «дата рождения неправильная»), — вызови propose_field_fix для документа, о котором шла речь. Назвали одну фамилию (имя, отчество) — передай в value только её: остальное приложение возьмёт из документа. Значение не назвали — спроси одним вопросом; ответ человека и есть значение: сразу propose_field_fix для того же документа, не ищи по нему документы. Поле исправит человек кнопкой «Принять».
-    Вложения из сообщения ты видишь как картинки; их id — a1, a2…, они перечислены в тексте сообщения. Предлагай, в какую папку их положить и как назвать.
-    Если нужный документ есть в списке документов ниже, сразу вызови show_cards — без поиска. Короткий текст ответа пиши в том же ходе, что и show_cards.
-    Даты рождения и выдачи, место рождения, кем выдан, прописка, суммы, люди и организации тоже есть в списке документов: если ответ там — отвечай сразу, без инструментов.
-    Краткие итоги своих рассуждений пиши по-русски.
-    """
+    static var system: String {
+        """
+        \(AgentIdentity.instructions)
+
+        Для показа полей документа, файла или уточнения вариантов используй инструмент show_cards (в fields включай все запрошенные поля — серию и номер тоже: карточка закроет их маской). Если документ есть в списке ниже, можно сразу показать его без поиска.
+        """
+    }
 
     private static let documentTypes: CloudJSON = .array(DocumentType.allCases.map { .string($0.rawValue) })
     private static let fieldKeys: CloudJSON = .array(FieldKey.order.map { .string($0) })
@@ -498,7 +535,7 @@ enum CloudChatPrompt {
         ],
         [
             "name": "get_document",
-            "description": "Поля и выдержка текста документа. Серия и номер приходят маской.",
+            "description": "Поля и выдержка текста документа из хранилища. Серия и номер приходят маской.",
             "parameters": [
                 "type": "object",
                 "properties": ["id": ["type": "string", "description": "id документа, например d42"]],
@@ -507,12 +544,24 @@ enum CloudChatPrompt {
         ],
         [
             "name": "view_document",
-            "description": "Посмотреть страницы документа картинками: штампы, отметки, то, чего нет в тексте. До 4 страниц за вызов.",
+            "description": "Посмотреть страницы документа из хранилища (d…) картинками: штампы, отметки, сканы, то, чего нет в тексте. До 4 страниц за вызов. Если передать id вложения чата (a…), откроет вложение.",
             "parameters": [
                 "type": "object",
                 "properties": [
-                    "id": ["type": "string", "description": "id документа, например d42"],
-                    "pages": ["type": "array", "items": ["type": "integer"], "description": "Номера страниц с 1; по умолчанию первые"],
+                    "id": ["type": "string", "description": "id документа (d42) или вложения чата (a1)"],
+                    "pages": ["type": "array", "items": ["type": "integer"], "description": "Номера страниц с 1; по умолчанию первые 4"],
+                ],
+                "required": ["id"],
+            ],
+        ],
+        [
+            "name": "view_attachment",
+            "description": "Посмотреть страницы и текст файла, присланного пользователем в этот чат (a1, a2…): фото, скриншоты, PDF (до 4 страниц за вызов). Используй, чтобы прочитать, пересмотреть или полистать вложение.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "id": ["type": "string", "description": "id вложения чата, например a1"],
+                    "pages": ["type": "array", "items": ["type": "integer"], "description": "Номера страниц с 1; по умолчанию первые 4"],
                 ],
                 "required": ["id"],
             ],
@@ -564,7 +613,7 @@ enum CloudChatPrompt {
         ],
         [
             "name": "propose_field_fix",
-            "description": "Исправить поле документа, которое распознавание прочитало неверно. Показывает «было → станет»; поле меняется, только когда человек нажмёт «Принять».",
+            "description": "Предложить исправление поля документа, распознанного с ошибкой (показывает «было → станет»). Поле меняется только после нажатия «Принять». Если названа одна фамилия/имя/отчество — передай её в value, остальное приложение сохранит из документа. Не вызывай с неизвестным значением.",
             "parameters": [
                 "type": "object",
                 "properties": [
@@ -577,7 +626,7 @@ enum CloudChatPrompt {
         ],
         [
             "name": "propose_file_actions",
-            "description": "Предложить действия с файлами. Ничего не меняется, пока человек не нажмёт «Принять» на карточке.",
+            "description": "Предложить действия с файлами: сохранить вложение в папку, перенести, переименовать файл или создать папку. Используй, когда пользователь просит сохранить/разложить файлы или это уместно по контексту; не вызывай автоматически, если человек просит прочитать, проверить или заполнить вложение. Ничего не меняется, пока человек не нажмёт «Принять». Не повторяй отклонённое предложение, пока пользователь не попросит снова.",
             "parameters": [
                 "type": "object",
                 "properties": [

@@ -57,6 +57,9 @@ final class LocalAgentEngine {
     /// Шагов на вопрос. Каждый шаг на iPhone — секунды, а настоящие вопросы
     /// укладываются в два-три: найти, посмотреть, показать
     static let maxSteps = 5
+    /// Для локальной модели карточки и предложения завершают ход, чтобы не
+    /// тратить лишний медленный прогон на iPhone
+    private static let terminalTools: Set<String> = ["show_cards", "propose_file_actions", "show_fact_card", "propose_fact_card", "propose_field_fix"]
     /// Результат инструмента для модели — не длиннее: это токены разбора
     static let resultLimit = 2000
 
@@ -116,8 +119,8 @@ final class LocalAgentEngine {
                 let result = await tools.run(call.name, arguments: arguments, cards: &cards)
                 if cards.count > before { onEvent(.cards(Array(cards[before...]))) }
                 results.append(AgentToolResult(id: call.id, name: call.name, content: Self.compact(result)))
-                // Карточка показана — ответ готов, как у облака
-                if CloudChatEngine.terminalTools.contains(call.name), cards.count > before { shownByTerminal = true }
+                // Карточка показана — ответ готов для локальной модели
+                if Self.terminalTools.contains(call.name), cards.count > before { shownByTerminal = true }
             }
             if shownByTerminal || step == Self.maxSteps { break }
             turn = try await model.continueAgent(results: results)

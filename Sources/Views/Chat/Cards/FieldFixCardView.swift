@@ -80,6 +80,7 @@ struct FieldFixCardView: View {
                         isApplying = true
                         before = current
                         await actions.fixField(document, key, value)
+                        actions.reportDecision("Действие пользователя: принял исправление поля «\(FieldKey.title(key))» документа d\(document.id)", "field_applied")
                         isApplying = false
                         tick &+= 1
                     }
@@ -95,6 +96,7 @@ struct FieldFixCardView: View {
                 .accessibilityIdentifier("fieldFixApply")
                 Button {
                     rejected = true
+                    actions.reportDecision("Действие пользователя: отклонил исправление поля «\(FieldKey.title(key))» документа d\(document.id)", "field_declined")
                 } label: {
                     Text("Отклонить")
                         .font(.subheadline.weight(.medium))

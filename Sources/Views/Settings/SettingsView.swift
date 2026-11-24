@@ -126,6 +126,12 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink {
+                        TelemetryDiagnosticsView()
+                    } label: {
+                        Label("Диагностика и логи", systemImage: "waveform.path.ecg")
+                    }
+                    .accessibilityIdentifier("settingsDiagnostics")
                     LabeledContent("Хранение", value: "Локально на iPhone")
                     LabeledContent("Версия", value: "1.0")
                 } footer: {

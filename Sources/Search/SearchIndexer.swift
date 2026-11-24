@@ -882,10 +882,17 @@ actor SearchIndexer {
         } catch let error as SQLiteError where error.code == SQLITE_CORRUPT || error.code == SQLITE_NOTADB {
             // Индекс производный: испорченный файл проще построить заново
             log.error("индекс повреждён, создаётся заново")
+            Task { @MainActor in
+                AppTelemetry.live?.recordError(category: "search-index", code: "corrupt_rebuilt", message: "Индекс повреждён, пересоздаётся заново")
+            }
             removeDatabaseFiles()
             store = try? makeStore()
         } catch {
             log.error("индекс не открылся: \(String(describing: error), privacy: .public)")
+            let errorType = String(describing: type(of: error))
+            Task { @MainActor in
+                AppTelemetry.live?.recordError(category: "search-index", code: "open_failed", message: "Индекс не открылся: \(errorType)")
+            }
         }
         return store
     }

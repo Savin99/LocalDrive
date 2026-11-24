@@ -6,7 +6,7 @@ import Foundation
 // Номеров здесь нет: в аргументах их не бывает, а цифры длиннее трёх закрываются
 @MainActor
 enum CloudChatSteps {
-    static func step(for name: String, arguments: CloudJSON, search: SearchService, facts: FactStore? = nil) async -> (ChatStep.Kind, String)? {
+    static func step(for name: String, arguments: CloudJSON, search: SearchService, facts: FactStore? = nil, inbox: ChatAttachmentInbox? = nil) async -> (ChatStep.Kind, String)? {
         switch name {
         case "search_documents":
             let query = masked(arguments["query"]?.string ?? "")
@@ -25,7 +25,15 @@ enum CloudChatSteps {
         case "get_document":
             return (.open, await documentTitle(arguments["id"]?.string, search: search).map { "Открываю: \($0)" } ?? "Открываю документ")
         case "view_document":
+            if let raw = arguments["id"]?.string, raw.hasPrefix("a"), let name = attachmentName(raw, inbox: inbox) {
+                return (.look, "Смотрю вложение: «\(name)»")
+            }
             return (.look, await documentTitle(arguments["id"]?.string, search: search).map { "Смотрю страницы: \($0)" } ?? "Смотрю страницы документа")
+        case "view_attachment":
+            if let name = attachmentName(arguments["id"]?.string, inbox: inbox) {
+                return (.look, "Смотрю вложение: «\(name)»")
+            }
+            return (.look, "Смотрю вложение")
         case "list_expiring":
             return (.expiry, "Проверяю сроки документов")
         case "show_cards":
@@ -62,6 +70,11 @@ enum CloudChatSteps {
     private static func folderName(_ raw: String?, search: SearchService) -> String? {
         guard let id = raw.flatMap(UUID.init(uuidString:)) else { return nil }
         return search.searchableFolders.first { $0.id == id }?.name
+    }
+
+    private static func attachmentName(_ raw: String?, inbox: ChatAttachmentInbox?) -> String? {
+        guard let raw, let name = inbox?.item(raw)?.name ?? inbox?.names[raw] else { return nil }
+        return masked(name)
     }
 
     private static func masked(_ text: String) -> String {

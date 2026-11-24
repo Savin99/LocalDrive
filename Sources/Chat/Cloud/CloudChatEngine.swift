@@ -124,22 +124,43 @@ enum CloudChatReasoning: String, CaseIterable, Sendable {
     }
 
     /// Сложный вопрос: длинный или просит сравнить, посчитать, проанализировать,
-    /// рассортировать, спланировать
+    /// рассортировать, заполнить бланк, проверить или разобрать вложение
     static func isComplex(_ message: String) -> Bool {
         let lower = message.lowercased()
         if lower.count > 160 { return true }
         let stems = ["сравн", "посчита", "подсчит", "вычисл", "сумм", "анализ", "проанализ", "сортир", "рассортир",
-                     "разбер", "разлож", "распредел", "спланир", "план", "объясн", "почему", "итог"]
+                     "разбер", "разлож", "распредел", "спланир", "план", "объясн", "почему", "итог",
+                     "заполн", "прочита", "посмотр", "бланк", "заявлен", "провер", "подготов", "состав", "вложен", "перевед"]
         return stems.contains { lower.contains($0) }
     }
 }
 
-/// Вложение, которое человек кинул в чат: id «a1», имя и кадр JPEG ≤ 2048 px.
-/// Список вложений — у агента B (ChatAttachmentInbox)
+/// Вложение, которое человек кинул в чат: id «a1», имя, кадры страниц JPEG и
+/// при наличии извлечённый текст (PDF или текстовый файл).
 struct CloudChatAttachment: Sendable, Equatable {
     let id: String
     let name: String
-    let jpeg: Data
+    let pages: [Data]
+    let totalPages: Int
+    let extractedText: String?
+
+    var jpeg: Data { pages.first ?? Data() }
+
+    init(id: String, name: String, jpeg: Data) {
+        self.id = id
+        self.name = name
+        self.pages = jpeg.isEmpty ? [] : [jpeg]
+        self.totalPages = 1
+        self.extractedText = nil
+    }
+
+    init(id: String, name: String, pages: [Data], totalPages: Int = 1, extractedText: String? = nil) {
+        self.id = id
+        self.name = name
+        self.pages = pages
+        self.totalPages = max(totalPages, max(1, pages.count))
+        self.extractedText = extractedText
+    }
 }
 
 /// Что видно, пока модель отвечает
@@ -181,10 +202,10 @@ final class CloudChatEngine {
         var reasoning: CloudChatReasoning
     }
 
-    static let maxRounds = 6
-    /// Инструменты, после которых ответ готов: карточки и предложение показаны,
-    /// лишний раунд за финальным текстом не нужен
-    static let terminalTools: Set<String> = ["show_cards", "propose_file_actions", "show_fact_card", "propose_fact_card", "propose_field_fix"]
+    static let maxRounds = 12
+    /// Только show_cards (вне GenUI) завершает ход сразу: инструменты-предложения
+    /// возвращают результат агенту, чтобы он сам завершил ответ и пояснил его.
+    static let terminalTools: Set<String> = ["show_cards"]
 
     /// Этап дольше этого — строкой в ленте шагов: где ушло время
     static let slowStage: TimeInterval = 3
@@ -235,6 +256,11 @@ final class CloudChatEngine {
         get { tools.facts }
         set { tools.facts = newValue }
     }
+    /// Вложения текущего чата: доступны инструменту view_attachment
+    var inbox: ChatAttachmentInbox? {
+        get { tools.inbox }
+        set { tools.inbox = newValue }
+    }
     /// Прошлые ходы разговора в формате сервиса — только в памяти
     private(set) var history: [CloudJSON] = []
     /// Чьей модели история: у другого сервиса другой формат, у другой модели
@@ -244,11 +270,11 @@ final class CloudChatEngine {
     /// Отказы сервера от необязательных полей: дальше в этой сессии без них
     private var options = CloudChatOptions()
 
-    init(configuration: Configuration, search: SearchService, proposals: FileProposalMaker? = nil, session: URLSession = .shared) {
+    init(configuration: Configuration, search: SearchService, proposals: FileProposalMaker? = nil, inbox: ChatAttachmentInbox? = nil, session: URLSession = .shared) {
         self.configuration = configuration
         self.session = session
         self.search = search
-        tools = CloudChatTools(search: search, proposals: proposals)
+        tools = CloudChatTools(search: search, proposals: proposals, inbox: inbox)
     }
 
     /// Инструкция этого разговора частями — та же, что уйдёт с вопросом
@@ -338,6 +364,14 @@ final class CloudChatEngine {
         history = dialect.appending(note: question, answer: answer, to: history)
     }
 
+    /// Решение пользователя по карточке предложения («Принять» / «Отклонить» / «Сохранить»),
+    /// чтобы агент в следующем сообщении видел, что именно произошло.
+    func recordDecision(_ text: String) {
+        guard !history.isEmpty else { return }
+        prepareHistory()
+        history = dialect.appending(event: text, to: history)
+    }
+
     /// Маска номеров документов, прошедших через инструменты
     func mask(_ text: String) -> String {
         tools.mask(text)
@@ -363,31 +397,61 @@ final class CloudChatEngine {
     ) async throws -> CloudChatReply {
         prepareHistory()
         let dialect = dialect
+        let hasContextAttachments = !attachments.isEmpty || !(tools.inbox?.items.isEmpty ?? true)
         let level = reasoningOverride
-            ?? configuration.reasoning.level(for: configuration.model, message: text, hasAttachments: !attachments.isEmpty, interface: genUI)
-        let listing = attachments.isEmpty ? "" : "\n\nВложения: " + attachments.map { "\($0.id) — «\($0.name)»" }.joined(separator: ", ")
+            ?? configuration.reasoning.level(for: configuration.model, message: text, hasAttachments: hasContextAttachments, interface: genUI)
+        let messageText = Self.composeUserMessage(text: text, attachments: attachments)
         var state = dialectState
-        var items = dialect.appending(user: text + listing, attachments: attachments, level: level,
+        var items = dialect.appending(user: messageText, attachments: attachments, level: level,
                                       to: dialect.withoutOldImages(history), state: &state)
 
         let round = RoundState()
         let started = Date()
+        let usageBefore = usage
         var thinkingSeconds: Double?
         var firstToken: Double?
         var firstCard: Double?
         var rounds = 0
+        var calledTools: [String] = []
+        var finishedCleanly = false
         defer {
+            let total = Date().timeIntervalSince(started)
             #if DEBUG
             // Только время — ни вопроса, ни ответа в журнале нет
-            let total = Date().timeIntervalSince(started)
             log.debug("облачный чат: первый токен \(firstToken ?? -1, format: .fixed(precision: 2)) с, первая карточка \(firstCard ?? -1, format: .fixed(precision: 2)) с, всего \(total, format: .fixed(precision: 2)) с, раундов \(rounds), рассуждение \(level, privacy: .public), \(self.configuration.model.rawValue, privacy: .public)")
             #endif
+            if finishedCleanly {
+                let deltaIn = max(0, usage.inputTokens - usageBefore.inputTokens)
+                let deltaCached = max(0, usage.cachedTokens - usageBefore.cachedTokens)
+                let deltaOut = max(0, usage.outputTokens - usageBefore.outputTokens)
+                AppTelemetry.live?.recordTiming(
+                    "cloud-chat",
+                    code: "turn_ok",
+                    message: "Ответ облака за \(String(format: "%.1f", total)) с (\(rounds) раунд., \(calledTools.count) инстр.)",
+                    meta: [
+                        "provider": configuration.provider.rawValue,
+                        "model": configuration.model.rawValue,
+                        "effort": level,
+                        "rounds": "\(rounds)",
+                        "tools": calledTools.isEmpty ? "none" : calledTools.joined(separator: ","),
+                        "attachments": "\(attachments.count)",
+                        "cards": "\(round.cards.count)",
+                        "genUI": genUI && self.options.genUI ? "true" : "false",
+                        "totalSec": String(format: "%.2f", total),
+                        "firstTokenSec": firstToken.map { String(format: "%.2f", $0) } ?? "-",
+                        "inputTokens": "\(deltaIn)",
+                        "cachedTokens": "\(deltaCached)",
+                        "outputTokens": "\(deltaOut)",
+                    ]
+                )
+            }
         }
         func visible() {
             if thinkingSeconds == nil, !round.thoughts.isEmpty { thinkingSeconds = Date().timeIntervalSince(started) }
         }
         let genUI = genUI
         func finish(_ text: String) -> CloudChatReply {
+            finishedCleanly = true
             if commit {
                 history = items
                 dialectState = state
@@ -450,6 +514,7 @@ final class CloudChatEngine {
             var results: [(call: CloudChatCall, result: CloudJSON)] = []
             var endsTurn = true
             for (index, call) in turn.calls.enumerated() {
+                calledTools.append(call.name)
                 onEvent(.tool(call.name))
                 if round.early[index] == nil {
                     await announce(call, onEvent: onEvent)
@@ -461,20 +526,43 @@ final class CloudChatEngine {
                 }
                 let outcome = round.early[index] ?? (result: [:], shown: false)
                 results.append((call, outcome.result))
-                // Карточка не показалась — модели нужен ещё раунд, чтобы это объяснить
+                // Только terminalTools (show_cards) завершают ход; остальные возвращают результат агенту
                 if !Self.terminalTools.contains(call.name) || !outcome.shown { endsTurn = false }
             }
             items = dialect.appending(results: results, to: items)
-            // Только карточки и предложения — ответ готов. Результаты остаются
-            // в истории, следующий вопрос продолжит этот ход
             if endsTurn { return finish(round.answer) }
         }
+        AppTelemetry.live?.recordError(
+            category: "cloud-chat",
+            code: "max_rounds_exceeded",
+            message: "Достигнут лимит раундов (\(Self.maxRounds))",
+            meta: ["tools": calledTools.joined(separator: ","), "model": configuration.model.rawValue]
+        )
         return finish(round.answer.isEmpty ? "Не успел собрать ответ — уточните вопрос." : round.answer)
+    }
+
+    /// Собирает текст хода пользователя вместе со списком и извлечённым текстом вложений.
+    /// Если человек прислал файлы без подписи — не подменяем его слова навязанным вопросом.
+    private static func composeUserMessage(text: String, attachments: [CloudChatAttachment]) -> String {
+        guard !attachments.isEmpty else { return text }
+        let items = attachments.map { item -> String in
+            let pages = item.totalPages > 1 ? " (\(item.totalPages) стр.)" : ""
+            return "\(item.id) — «\(item.name)»\(pages)"
+        }.joined(separator: ", ")
+        var parts: [String] = []
+        if !text.isEmpty { parts.append(text) }
+        parts.append("Вложения: " + items)
+        for item in attachments {
+            if let extracted = item.extractedText?.trimmingCharacters(in: .whitespacesAndNewlines), !extracted.isEmpty {
+                parts.append("Текст вложения \(item.id) («\(item.name)»):\n\(extracted)")
+            }
+        }
+        return parts.joined(separator: "\n\n")
     }
 
     /// Шаг на экране — до того, как инструмент начнёт работу
     private func announce(_ call: CloudChatCall, onEvent: @MainActor (CloudChatEvent) -> Void) async {
-        guard let (kind, text) = await CloudChatSteps.step(for: call.name, arguments: call.arguments, search: search, facts: facts) else { return }
+        guard let (kind, text) = await CloudChatSteps.step(for: call.name, arguments: call.arguments, search: search, facts: facts, inbox: tools.inbox) else { return }
         onEvent(.step(kind, text))
     }
 
@@ -700,6 +788,8 @@ protocol CloudChatDialect {
                    state: inout CloudChatDialectState) -> [CloudJSON]
     /// Вопрос и ответ, данный без облака
     func appending(note question: String, answer: String, to history: [CloudJSON]) -> [CloudJSON]
+    /// Событие интерфейса (например, решение пользователя по карточке предложения)
+    func appending(event note: String, to history: [CloudJSON]) -> [CloudJSON]
     func request(history: [CloudJSON], system: CloudChatSystem, configuration: CloudChatEngine.Configuration, level: String,
                  state: CloudChatDialectState, options: CloudChatOptions, genUI: Bool) -> URLRequest
     /// Прогрев кэша префикса без ответа модели. nil — сервис так не умеет
@@ -751,8 +841,8 @@ private func event(_ line: String) -> CloudJSON? {
 struct GeminiChatDialect: CloudChatDialect {
     func appending(user text: String, attachments: [CloudChatAttachment], level: String, to history: [CloudJSON],
                    state: inout CloudChatDialectState) -> [CloudJSON] {
-        var parts: [CloudJSON] = attachments.map { attachment in
-            ["inline_data": ["mime_type": "image/jpeg", "data": .string(attachment.jpeg.base64EncodedString())]]
+        var parts: [CloudJSON] = attachments.flatMap(\.pages).prefix(8).map { jpeg in
+            ["inline_data": ["mime_type": "image/jpeg", "data": .string(jpeg.base64EncodedString())]]
         }
         parts.append(["text": .string(text)])
         return appendingUser(parts, to: history)
@@ -760,6 +850,10 @@ struct GeminiChatDialect: CloudChatDialect {
 
     func appending(note question: String, answer: String, to history: [CloudJSON]) -> [CloudJSON] {
         appendingUser([["text": .string(question)]], to: history) + [["role": "model", "parts": [["text": .string(answer)]]]]
+    }
+
+    func appending(event note: String, to history: [CloudJSON]) -> [CloudJSON] {
+        appendingUser([["text": .string("[\(note)]")]], to: history)
     }
 
     /// Прошлый ответ кончился карточками без текстового раунда: ход человека
@@ -841,7 +935,7 @@ struct GeminiChatDialect: CloudChatDialect {
             guard content["role"]?.string == "user", let parts = content["parts"]?.array,
                   parts.contains(where: { $0["inline_data"] != nil }) else { return content }
             let replaced: [CloudJSON] = parts.map { part in
-                part["inline_data"] == nil ? part : ["text": "[изображение вложения — уже показано выше]"]
+                part["inline_data"] == nil ? part : ["text": "[изображение вложения — уже показано выше; при необходимости открой снова через view_attachment]"]
             }
             return ["role": "user", "parts": .array(replaced)]
         }
@@ -875,8 +969,8 @@ struct OpenAIChatDialect: CloudChatDialect {
         }
         state.currentLevel = level
         var content: [CloudJSON] = [["type": "input_text", "text": .string(text)]]
-        content += attachments.map { attachment in
-            ["type": "input_image", "image_url": .string("data:image/jpeg;base64,\(attachment.jpeg.base64EncodedString())"), "detail": "high"]
+        content += attachments.flatMap(\.pages).prefix(8).map { jpeg in
+            ["type": "input_image", "image_url": .string("data:image/jpeg;base64,\(jpeg.base64EncodedString())"), "detail": "high"]
         }
         items.append(["role": "user", "content": .array(content)])
         return items
@@ -887,6 +981,10 @@ struct OpenAIChatDialect: CloudChatDialect {
             ["role": "user", "content": .string(question)],
             ["role": "assistant", "content": .string(answer)],
         ]
+    }
+
+    func appending(event note: String, to history: [CloudJSON]) -> [CloudJSON] {
+        history + [["role": "user", "content": .string("[\(note)]")]]
     }
 
     func request(history: [CloudJSON], system: CloudChatSystem, configuration: CloudChatEngine.Configuration, level: String,
@@ -936,9 +1034,9 @@ struct OpenAIChatDialect: CloudChatDialect {
             "model": .string(configuration.model.provider == .openAI ? configuration.model.rawValue : CloudChatModel.luna.rawValue),
             "tools": genUI ? genUITools : tools,
             "reasoning": .object(reasoning),
-            // Коротко — меньше токенов, быстрее ответ (API deployment checklist).
-            // Интерфейсом — строгий JSON по схеме Generative UI
-            "text": genUI ? ["verbosity": "low", "format": CloudChatGenUI.textFormat] : ["verbosity": "low"],
+            // Естественная глубина ответа, как в ChatGPT: коротко на простой вопрос,
+            // подробно — когда нужно разобрать бланк или документ.
+            "text": genUI ? ["verbosity": "medium", "format": CloudChatGenUI.textFormat] : ["verbosity": "medium"],
             "store": false,
             "max_output_tokens": 16_000,
         ]
@@ -1059,17 +1157,17 @@ struct OpenAIChatDialect: CloudChatDialect {
 
     func withoutOldImages(_ history: [CloudJSON]) -> [CloudJSON] {
         history.map { item in
-            // Страницы, которые модель уже посмотрела, второй раз не уходят
+            // Страницы, которые модель уже посмотрела, второй раз не уходят, но их можно открыть снова инструментом
             if item["type"]?.string == "function_call_output", let output = item["output"]?.array,
                output.contains(where: { $0["type"]?.string == "input_image" }), case .object(var object) = item {
                 object["output"] = .array(output.filter { $0["type"]?.string != "input_image" }
-                    + [["type": "input_text", "text": "[страницы документа — уже показаны выше]"]])
+                    + [["type": "input_text", "text": "[страницы документа — уже показаны выше; при необходимости открой снова через view_document или view_attachment]"]])
                 return .object(object)
             }
             guard item["role"]?.string == "user", let content = item["content"]?.array,
                   content.contains(where: { $0["type"]?.string == "input_image" }) else { return item }
             let replaced: [CloudJSON] = content.map { part in
-                part["type"]?.string == "input_image" ? ["type": "input_text", "text": "[изображение вложения — уже показано выше]"] : part
+                part["type"]?.string == "input_image" ? ["type": "input_text", "text": "[изображение вложения — уже показано выше; при необходимости открой снова через view_attachment]"] : part
             }
             return ["role": "user", "content": .array(replaced)]
         }
